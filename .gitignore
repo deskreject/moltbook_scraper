@@ -63,6 +63,8 @@ logs/
 *.md
 !README.md
 !CLAUDE.md
+!claude_handover.md
+!claude_archive.md
 docs/
 
 # Misc temp files

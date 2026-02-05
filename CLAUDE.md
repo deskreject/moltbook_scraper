@@ -169,6 +169,18 @@ from the requirements.txt or the renv lock file
 - **Safety**: Do not use `sudo`. Do not reveal `MOLTBOOK_API_KEY` in logs or chat outputs.
 - **Costs**: If an automated task (like a loop) exceeds 5 iterations without success, stop and ask for guidance to avoid burning API tokens.
 
-## Data hygene
+## Data Hygiene
 
-- Large databases (>100MB) should be stored in a directory named /data/raw which is added to .gitignore. Only .rds summaries go in /data/processed.
+- Large databases (>100MB) should be stored in `data/raw/` which is added to `.gitignore`. Only `.rds` summaries go in `data/processed/`.
+- The default `--db moltbook.db` stores in project root; move to `data/raw/moltbook.db` once scraping is operational.
+- R scripts in `analysis/R/` expect the DB at `../../moltbook.db` (relative to their directory). Update `utils.R:connect_db()` if the DB path changes.
+
+## Methodology Log
+
+| Date       | Decision                                   | Reasoning                                                        | Status      |
+|------------|--------------------------------------------|-----------------------------------------------------------------|-------------|
+| 2026-02-05 | Store DB at `data/raw/moltbook.db`         | Keeps large binary out of repo root; aligned with data hygiene rule | Planned     |
+| 2026-02-05 | Use snapshot tables for all analysis        | Reproducibility: live tables mutate on each scrape               | Established |
+| 2026-02-05 | 80% tolerance for comment validation        | API caps comments at 1000/post; can never reach platform total   | Established |
+| 2026-02-05 | Non-deterministic pagination with dedup     | Moltbook API returns inconsistent pages; streaming + seen-set    | Established |
+| 2026-02-05 | Rewrite `daily_scrape.sh` for Windows/local | Original hardcoded to `/Users/dholtz/...` (upstream author)      | Planned     |
