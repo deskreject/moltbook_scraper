@@ -1,10 +1,14 @@
 """Moltbook API client."""
 
+import logging
 import random
 import time
+from collections import deque
 from typing import Optional, Callable
 
 import requests
+
+logger = logging.getLogger("moltbook.client")
 
 
 class RateLimitError(Exception):
@@ -16,6 +20,16 @@ class MoltbookClient:
     """Client for interacting with the Moltbook API."""
 
     BASE_URL = "https://www.moltbook.com/api/v1"
+
+    # Sliding-window throttle settings
+    RATE_WINDOW = 60.0  # seconds
+    RATE_LIMIT = 100  # max requests per window (API limit)
+    RATE_THRESHOLD = 90  # proactive threshold (90% of limit)
+
+    # Escalating cooldown settings
+    COOLDOWN_BASE = 30  # seconds
+    COOLDOWN_CAP = 300  # max cooldown in seconds
+    MAX_CONSECUTIVE_429S = 10  # raise after this many consecutive 429s
 
     def __init__(
         self,
@@ -35,6 +49,67 @@ class MoltbookClient:
             "Content-Type": "application/json",
         })
 
+        # Proactive rate-limit state
+        self._request_timestamps: deque[float] = deque()
+        self._consecutive_429s: int = 0
+        self._cooldown_until: float = 0.0
+
+    def _enforce_throttle(self) -> None:
+        """Proactive sliding-window throttle. Sleeps if needed to stay under limit."""
+        now = time.time()
+
+        # 1. Respect any active cooldown
+        if now < self._cooldown_until:
+            sleep_time = self._cooldown_until - now
+            logger.warning(
+                "Rate-limit cooldown: sleeping %.1fs (triggered after %d consecutive 429s)",
+                sleep_time, self._consecutive_429s,
+            )
+            time.sleep(sleep_time)
+
+        # 2. Trim timestamps outside the window
+        cutoff = time.time() - self.RATE_WINDOW
+        while self._request_timestamps and self._request_timestamps[0] < cutoff:
+            self._request_timestamps.popleft()
+
+        # 3. If at threshold, sleep until the oldest request falls out of window
+        if len(self._request_timestamps) >= self.RATE_THRESHOLD:
+            oldest = self._request_timestamps[0]
+            sleep_time = oldest + self.RATE_WINDOW - time.time() + 0.1
+            if sleep_time > 0:
+                logger.warning(
+                    "Sliding-window throttle: %d requests in last 60s (threshold %d), "
+                    "sleeping %.1fs",
+                    len(self._request_timestamps), self.RATE_THRESHOLD, sleep_time,
+                )
+                time.sleep(sleep_time)
+
+    def _on_429(self) -> None:
+        """Handle a 429 response: increment counter, possibly enter cooldown."""
+        self._consecutive_429s += 1
+
+        if self._consecutive_429s >= self.MAX_CONSECUTIVE_429S:
+            raise RateLimitError(
+                f"Received {self._consecutive_429s} consecutive 429 responses "
+                f"({self.request_count} total requests in session). "
+                f"Check API key validity and rate limit status."
+            )
+
+        if self._consecutive_429s >= 3:
+            exponent = self._consecutive_429s - 3
+            cooldown = min(self.COOLDOWN_BASE * (2 ** exponent), self.COOLDOWN_CAP)
+            self._cooldown_until = time.time() + cooldown
+            logger.info(
+                "Entering extended cooldown: %.0fs after %d consecutive 429 responses. "
+                "Check API key validity and rate limit status.",
+                cooldown, self._consecutive_429s,
+            )
+
+    def _on_success(self) -> None:
+        """Record a successful request."""
+        self._consecutive_429s = 0
+        self._request_timestamps.append(time.time())
+
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         """Make a request with retry logic for rate limiting and server errors."""
         # Set default timeout if not provided
@@ -43,6 +118,9 @@ class MoltbookClient:
 
         last_error = None
         for attempt in range(self.max_retries + 1):
+            # Proactive throttle before each attempt
+            self._enforce_throttle()
+
             self.request_count += 1
             if self.on_request:
                 self.on_request(url)
@@ -59,6 +137,7 @@ class MoltbookClient:
 
             # Retry on rate limit (429)
             if response.status_code == 429:
+                self._on_429()
                 if attempt < self.max_retries:
                     delay = self.base_delay * (2 ** attempt)
                     time.sleep(delay)
@@ -75,8 +154,10 @@ class MoltbookClient:
                     time.sleep(delay)
                     continue
                 # On final attempt, return the response so raise_for_status can handle it
+                self._on_success()
                 return response
 
+            self._on_success()
             return response
 
         # Should not reach here

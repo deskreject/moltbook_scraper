@@ -30,7 +30,8 @@ moltbook_scraper/
 ├── latex/
 │   └── moltbook_analysis.tex # Paper source (natbib, booktabs)
 ├── scripts/
-│   ├── daily_scrape.sh      # Cron-style scraping
+│   ├── daily_scrape.ps1     # Windows PowerShell daily scrape (primary)
+│   ├── daily_scrape.sh      # Bash daily scrape (cross-platform reference)
 │   └── run_on_hpc.sh        # HPC cluster job
 └── tests/                   # pytest unit tests
 ```
@@ -169,6 +170,24 @@ from the requirements.txt or the renv lock file
 - **Safety**: Do not use `sudo`. Do not reveal `MOLTBOOK_API_KEY` in logs or chat outputs.
 - **Costs**: If an automated task (like a loop) exceeds 5 iterations without success, stop and ask for guidance to avoid burning API tokens.
 
+## Context & Token Economy
+
+### Log file handling
+- **Never** `Read` an entire scrape log file. Scrape logs can be hundreds of thousands of lines (multi-day processes). Always use `tail -50` or `head -50` via Bash first, or use `Read` with `offset`/`limit` to sample specific regions.
+- When diagnosing scrape failures, read only the **last 100 lines** of the log unless explicitly asked for more.
+
+### Large file guardrails
+- Before reading any file, check its size. If > 5,000 lines, read only the relevant section (start, end, or grep for keywords).
+- Never dump entire database query results into chat. Use `LIMIT 10` for exploratory queries; use `COUNT(*)` for sizing.
+
+### Error-loop circuit breaker
+- If the same tool call (Bash command, Read, etc.) fails **3 times in a row** with the same or similar error, **stop and ask the user** rather than retrying with minor variations. This prevents context-burning retry loops.
+- If a code fix → test cycle fails **3 consecutive times**, pause and present a summary of what was tried and what failed.
+
+### Scraping cost awareness
+- Before starting any scrape command, state the estimated duration and API call count.
+- If a scrape command has been running for > 10 minutes in a foreground Bash call, do not wait — inform the user it should be backgrounded or run in a separate terminal.
+
 ## Data Hygiene
 
 - Large databases (>100MB) should be stored in `data/raw/` which is added to `.gitignore`. Only `.rds` summaries go in `data/processed/`.
@@ -188,3 +207,6 @@ from the requirements.txt or the renv lock file
 | 2026-02-13 | DB path: `data/raw/moltbook.db`              | Smoke test confirmed; DB auto-created by SQLite on first run     | Active      |
 | 2026-02-13 | UTF-8 encoding for all file writes on Windows | cp1252 default breaks on emoji in Moltbook docs                  | Fixed       |
 | 2026-02-13 | Upstream remote added for drift detection     | `git fetch upstream` to check for API changes by original author | Active      |
+| 2026-02-13 | Proactive rate throttle (90/min sliding window) | Avoid 429 storms; maintain diagnostic logs | Active |
+| 2026-02-13 | PowerShell daily_scrape.ps1 replaces .sh       | Windows 11 environment; .sh kept for reference | Active |
+| 2026-02-13 | Context-economy rules in CLAUDE.md             | Prevent token burn on large logs, error loops, and DB dumps | Active |

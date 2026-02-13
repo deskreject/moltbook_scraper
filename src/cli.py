@@ -1,6 +1,7 @@
 """Command-line interface for Moltbook scraper."""
 
 import argparse
+import logging
 import os
 import sys
 from datetime import datetime
@@ -12,6 +13,35 @@ from dotenv import load_dotenv
 from src.client import MoltbookClient
 from src.database import Database
 from src.scraper import Scraper
+
+
+def _configure_logging(log_file: str | None = None) -> None:
+    """Configure logging to stderr and optionally to a file.
+
+    The moltbook.client logger emits throttle/cooldown diagnostics.
+    This routes them to stderr (always) and to a timestamped log file
+    (when a scrape log path is provided).
+    """
+    root_logger = logging.getLogger("moltbook")
+    root_logger.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.INFO)
+    stderr_handler.setFormatter(fmt)
+    root_logger.addHandler(stderr_handler)
+
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(fmt)
+        root_logger.addHandler(file_handler)
 
 
 # Moltbook documentation URLs to snapshot
@@ -83,7 +113,15 @@ def main():
         action="store_true",
         help="For comments: only fetch for posts without comments yet",
     )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Path to log file for diagnostics (throttle events, errors)",
+    )
     args = parser.parse_args()
+
+    # Set up logging (stderr always; file if --log-file provided)
+    _configure_logging(log_file=args.log_file)
 
     api_key = os.getenv("MOLTBOOK_API_KEY")
     if not api_key and args.command not in ("status", "docs"):
