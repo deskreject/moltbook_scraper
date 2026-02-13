@@ -48,10 +48,14 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Data files (raw databases, processed summaries)
+data/
+
 # Analysis outputs (figures, tables)
 analysis/output/figures/
 analysis/output/tables/
 analysis/R/*.rds
+analysis/data/
 
 # Snapshots (docs, data archives)
 snapshots/
@@ -65,6 +69,7 @@ logs/
 !CLAUDE.md
 !claude_handover.md
 !claude_archive.md
+!data/README.md
 docs/
 
 # Misc temp files

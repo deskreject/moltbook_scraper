@@ -46,7 +46,7 @@ def fetch_docs(output_dir: str = "snapshots/docs") -> dict:
 
             filename = f"{name}_{timestamp}.md"
             filepath = output_path / filename
-            filepath.write_text(response.text)
+            filepath.write_text(response.text, encoding="utf-8")
 
             saved_files[name] = str(filepath)
             log(f"  Saved {name}.md ({len(response.text):,} bytes)")

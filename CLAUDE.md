@@ -184,3 +184,7 @@ from the requirements.txt or the renv lock file
 | 2026-02-05 | 80% tolerance for comment validation        | API caps comments at 1000/post; can never reach platform total   | Established |
 | 2026-02-05 | Non-deterministic pagination with dedup     | Moltbook API returns inconsistent pages; streaming + seen-set    | Established |
 | 2026-02-05 | Rewrite `daily_scrape.sh` for Windows/local | Original hardcoded to `/Users/dholtz/...` (upstream author)      | Planned     |
+| 2026-02-13 | Staged scrape instead of monolithic `full`   | At 100 req/min, full scrape takes days; stages are resumable     | Established |
+| 2026-02-13 | DB path: `data/raw/moltbook.db`              | Smoke test confirmed; DB auto-created by SQLite on first run     | Active      |
+| 2026-02-13 | UTF-8 encoding for all file writes on Windows | cp1252 default breaks on emoji in Moltbook docs                  | Fixed       |
+| 2026-02-13 | Upstream remote added for drift detection     | `git fetch upstream` to check for API changes by original author | Active      |
