@@ -1,14 +1,9 @@
 """Moltbook API client."""
 
-import logging
-import random
 import time
-from collections import deque
 from typing import Optional, Callable
 
 import requests
-
-logger = logging.getLogger("moltbook.client")
 
 
 class RateLimitError(Exception):
@@ -16,20 +11,37 @@ class RateLimitError(Exception):
     pass
 
 
+def _normalize_agent(agent: dict) -> dict:
+    """Normalize agent dict from API responses to use consistent snake_case keys.
+
+    Embedded author objects in posts/comments use camelCase (avatarUrl,
+    followerCount, etc.) while the profile endpoint uses snake_case.
+    This normalizes both to snake_case for consistent database storage.
+    """
+    key_map = {
+        "avatarUrl": "avatar_url",
+        "followerCount": "follower_count",
+        "followingCount": "following_count",
+        "isClaimed": "is_claimed",
+        "isActive": "is_active",
+        "createdAt": "created_at",
+        "lastActive": "last_active",
+        "displayName": "display_name",
+        "postsCount": "posts_count",
+        "commentsCount": "comments_count",
+        "isVerified": "is_verified",
+        "claimedBy": "claimed_by",
+    }
+    normalized = {}
+    for k, v in agent.items():
+        normalized[key_map.get(k, k)] = v
+    return normalized
+
+
 class MoltbookClient:
     """Client for interacting with the Moltbook API."""
 
     BASE_URL = "https://www.moltbook.com/api/v1"
-
-    # Sliding-window throttle settings
-    RATE_WINDOW = 60.0  # seconds
-    RATE_LIMIT = 100  # max requests per window (API limit)
-    RATE_THRESHOLD = 90  # proactive threshold (90% of limit)
-
-    # Escalating cooldown settings
-    COOLDOWN_BASE = 30  # seconds
-    COOLDOWN_CAP = 300  # max cooldown in seconds
-    MAX_CONSECUTIVE_429S = 10  # raise after this many consecutive 429s
 
     def __init__(
         self,
@@ -49,78 +61,13 @@ class MoltbookClient:
             "Content-Type": "application/json",
         })
 
-        # Proactive rate-limit state
-        self._request_timestamps: deque[float] = deque()
-        self._consecutive_429s: int = 0
-        self._cooldown_until: float = 0.0
-
-    def _enforce_throttle(self) -> None:
-        """Proactive sliding-window throttle. Sleeps if needed to stay under limit."""
-        now = time.time()
-
-        # 1. Respect any active cooldown
-        if now < self._cooldown_until:
-            sleep_time = self._cooldown_until - now
-            logger.warning(
-                "Rate-limit cooldown: sleeping %.1fs (triggered after %d consecutive 429s)",
-                sleep_time, self._consecutive_429s,
-            )
-            time.sleep(sleep_time)
-
-        # 2. Trim timestamps outside the window
-        cutoff = time.time() - self.RATE_WINDOW
-        while self._request_timestamps and self._request_timestamps[0] < cutoff:
-            self._request_timestamps.popleft()
-
-        # 3. If at threshold, sleep until the oldest request falls out of window
-        if len(self._request_timestamps) >= self.RATE_THRESHOLD:
-            oldest = self._request_timestamps[0]
-            sleep_time = oldest + self.RATE_WINDOW - time.time() + 0.1
-            if sleep_time > 0:
-                logger.warning(
-                    "Sliding-window throttle: %d requests in last 60s (threshold %d), "
-                    "sleeping %.1fs",
-                    len(self._request_timestamps), self.RATE_THRESHOLD, sleep_time,
-                )
-                time.sleep(sleep_time)
-
-    def _on_429(self) -> None:
-        """Handle a 429 response: increment counter, possibly enter cooldown."""
-        self._consecutive_429s += 1
-
-        if self._consecutive_429s >= self.MAX_CONSECUTIVE_429S:
-            raise RateLimitError(
-                f"Received {self._consecutive_429s} consecutive 429 responses "
-                f"({self.request_count} total requests in session). "
-                f"Check API key validity and rate limit status."
-            )
-
-        if self._consecutive_429s >= 3:
-            exponent = self._consecutive_429s - 3
-            cooldown = min(self.COOLDOWN_BASE * (2 ** exponent), self.COOLDOWN_CAP)
-            self._cooldown_until = time.time() + cooldown
-            logger.info(
-                "Entering extended cooldown: %.0fs after %d consecutive 429 responses. "
-                "Check API key validity and rate limit status.",
-                cooldown, self._consecutive_429s,
-            )
-
-    def _on_success(self) -> None:
-        """Record a successful request."""
-        self._consecutive_429s = 0
-        self._request_timestamps.append(time.time())
-
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         """Make a request with retry logic for rate limiting and server errors."""
         # Set default timeout if not provided
         if "timeout" not in kwargs:
             kwargs["timeout"] = 30
 
-        last_error = None
         for attempt in range(self.max_retries + 1):
-            # Proactive throttle before each attempt
-            self._enforce_throttle()
-
             self.request_count += 1
             if self.on_request:
                 self.on_request(url)
@@ -128,7 +75,6 @@ class MoltbookClient:
             try:
                 response = self.session.request(method, url, **kwargs)
             except requests.exceptions.Timeout as e:
-                last_error = e
                 if attempt < self.max_retries:
                     delay = self.base_delay * (2 ** attempt)
                     time.sleep(delay)
@@ -137,7 +83,6 @@ class MoltbookClient:
 
             # Retry on rate limit (429)
             if response.status_code == 429:
-                self._on_429()
                 if attempt < self.max_retries:
                     delay = self.base_delay * (2 ** attempt)
                     time.sleep(delay)
@@ -154,10 +99,8 @@ class MoltbookClient:
                     time.sleep(delay)
                     continue
                 # On final attempt, return the response so raise_for_status can handle it
-                self._on_success()
                 return response
 
-            self._on_success()
             return response
 
         # Should not reach here
@@ -167,16 +110,15 @@ class MoltbookClient:
         self,
         on_page: Optional[Callable[[int, int], None]] = None,
     ) -> list[dict]:
-        """Fetch all submolts, paginating through all pages.
+        """Fetch all submolts using page-based pagination.
 
         Args:
             on_page: Optional callback called with (page_num, submolts_so_far)
         """
         all_submolts = []
-        offset = 0
-        page = 0
+        page = 1
         while True:
-            params = {"offset": offset} if offset > 0 else {}
+            params = {"page": page}
             response = self._request("GET", f"{self.BASE_URL}/submolts", params=params)
             response.raise_for_status()
             data = response.json()
@@ -184,13 +126,9 @@ class MoltbookClient:
             if not submolts:
                 break
             all_submolts.extend(submolts)
-            page += 1
             if on_page:
                 on_page(page, len(all_submolts))
-            # If we got fewer than 100 (the apparent page size), we're done
-            if len(submolts) < 100:
-                break
-            offset += len(submolts)
+            page += 1
         return all_submolts
 
     def fetch_submolts_streaming(
@@ -199,128 +137,91 @@ class MoltbookClient:
         target_count: int = 0,
         max_stale_pages: int = 20,
     ) -> int:
-        """Fetch all submolts, calling on_page with each batch for immediate saving.
-
-        The API is non-deterministic, so we keep fetching until we hit target_count
-        unique submolts, or until we've seen max_stale_pages consecutive pages with
-        no new submolts.
+        """Fetch all submolts using page-based pagination, calling on_page with each batch.
 
         Args:
             on_page: Callback called with (page_num, submolts_list) for each page.
-            target_count: Target number of unique submolts to collect. If 0, uses
-                pagination signals (less reliable with flaky API).
-            max_stale_pages: Stop after this many consecutive pages with <10% new submolts.
+            target_count: Ignored (kept for caller compatibility).
+            max_stale_pages: Ignored (kept for caller compatibility).
 
         Returns:
-            Total number of unique submolts fetched.
+            Total number of submolts fetched.
         """
         total = 0
-        offset = 0
-        page = 0
-        page_size = 100
-        seen_names = set()  # Track unique submolts
-        stale_pages = 0  # Count consecutive pages with mostly duplicates
+        page = 1
         consecutive_errors = 0
-        max_consecutive_errors = 10  # Give up after 10 consecutive failures
+        max_consecutive_errors = 10
 
         while True:
-            params = {"offset": offset} if offset > 0 else {}
+            params = {"page": page}
             try:
                 response = self._request("GET", f"{self.BASE_URL}/submolts", params=params)
                 response.raise_for_status()
                 data = response.json()
                 submolts = data.get("submolts", [])
-                consecutive_errors = 0  # Reset on success
+                consecutive_errors = 0
             except Exception:
                 consecutive_errors += 1
                 if consecutive_errors >= max_consecutive_errors:
-                    break  # Too many consecutive failures
-                # Try a different offset
-                offset = random.randint(0, max(target_count, 20000))
+                    break
                 time.sleep(self.base_delay * consecutive_errors)
                 continue
 
             if not submolts:
-                # Try a different offset range if we got empty results
-                if target_count > 0 and total < target_count:
-                    offset = (offset + 1000) % (target_count * 2)
-                    stale_pages += 1
-                    if stale_pages >= max_stale_pages:
-                        break
-                    continue
                 break
 
-            # Filter to only new submolts
-            new_submolts = [s for s in submolts if s.get("name") not in seen_names]
-
-            if new_submolts:
-                page += 1
-                on_page(page, new_submolts)
-                total += len(new_submolts)
-                for s in new_submolts:
-                    seen_names.add(s.get("name"))
-                stale_pages = 0  # Reset stale counter
-            else:
-                stale_pages += 1
-
-            # Check if we've hit target
-            if target_count > 0 and total >= target_count:
-                break
-
-            # Check if we're stuck (too many stale pages)
-            if stale_pages >= max_stale_pages:
-                break
-
-            # Advance offset - jump around if we're seeing lots of duplicates
-            if len(new_submolts) < len(submolts) * 0.5:
-                # Mostly duplicates - try a different offset range
-                offset = random.randint(0, max(target_count, 20000))
-            else:
-                offset += page_size
+            on_page(page, submolts)
+            total += len(submolts)
+            page += 1
 
         return total
 
-    def fetch_posts(self, offset: int = 0, limit: int = 100) -> list[dict]:
-        """Fetch a page of posts from the API."""
+    def fetch_posts(self, limit: int = 100, cursor: Optional[str] = None) -> dict:
+        """Fetch a page of posts from the API using cursor-based pagination.
+
+        Returns:
+            Dict with keys: posts, has_more, next_cursor
+        """
         params = {"limit": limit}
-        if offset > 0:
-            params["offset"] = offset
+        if cursor:
+            params["cursor"] = cursor
         response = self._request("GET", f"{self.BASE_URL}/posts", params=params)
         response.raise_for_status()
         data = response.json()
-        return data["posts"]
+        return {
+            "posts": data.get("posts", []),
+            "has_more": data.get("has_more", False),
+            "next_cursor": data.get("next_cursor"),
+        }
 
     def fetch_all_posts(
         self,
         on_page: Optional[Callable[[int, int], None]] = None,
         limit: int = 100,
     ) -> list[dict]:
-        """Fetch all posts, paginating through all pages.
+        """Fetch all posts using cursor-based pagination.
 
         Args:
             on_page: Optional callback called with (page_num, posts_so_far)
             limit: Number of posts per page (default 100)
         """
         all_posts = []
-        offset = 0
+        cursor = None
         page = 0
         while True:
-            params = {"limit": limit}
-            if offset > 0:
-                params["offset"] = offset
-            response = self._request("GET", f"{self.BASE_URL}/posts", params=params)
-            response.raise_for_status()
-            data = response.json()
-            posts = data.get("posts", [])
+            result = self.fetch_posts(limit=limit, cursor=cursor)
+            posts = result["posts"]
             if not posts:
                 break
             all_posts.extend(posts)
             page += 1
             if on_page:
                 on_page(page, len(all_posts))
-            if len(posts) < limit:
+            if not result["has_more"]:
                 break
-            offset += limit
+            cursor = result["next_cursor"]
+            if not cursor:
+                break
         return all_posts
 
     def fetch_posts_streaming(
@@ -329,82 +230,46 @@ class MoltbookClient:
         target_count: int = 0,
         max_stale_pages: int = 20,
     ) -> int:
-        """Fetch all posts, calling on_page with each batch for immediate saving.
-
-        The API is non-deterministic, so we keep fetching until we hit target_count
-        unique posts, or until we've seen max_stale_pages consecutive pages with
-        no new posts.
+        """Fetch all posts using cursor-based pagination, calling on_page with each batch.
 
         Args:
             on_page: Callback called with (page_num, posts_list) for each page.
-            target_count: Target number of unique posts to collect.
-            max_stale_pages: Stop after this many consecutive pages with <10% new posts.
+            target_count: Ignored (kept for caller compatibility).
+            max_stale_pages: Ignored (kept for caller compatibility).
 
         Returns:
-            Total number of unique posts fetched.
+            Total number of posts fetched.
         """
         total_posts = 0
-        offset = 0
+        cursor = None
         page = 0
-        page_size = 100  # Posts now support 100 per page
-        seen_ids = set()  # Track unique posts
-        stale_pages = 0
         consecutive_errors = 0
         max_consecutive_errors = 10
 
         while True:
-            params = {"limit": page_size}
-            if offset > 0:
-                params["offset"] = offset
             try:
-                response = self._request("GET", f"{self.BASE_URL}/posts", params=params)
-                response.raise_for_status()
+                result = self.fetch_posts(limit=100, cursor=cursor)
+                consecutive_errors = 0
             except Exception:
                 consecutive_errors += 1
                 if consecutive_errors >= max_consecutive_errors:
                     break
-                offset = random.randint(0, max(target_count, 100000))
                 time.sleep(self.base_delay * consecutive_errors)
                 continue
-            consecutive_errors = 0
-            data = response.json()
-            posts = data.get("posts", [])
 
+            posts = result["posts"]
             if not posts:
-                if target_count > 0 and total_posts < target_count:
-                    offset = (offset + 500) % (target_count * 2)
-                    stale_pages += 1
-                    if stale_pages >= max_stale_pages:
-                        break
-                    continue
                 break
 
-            # Filter to only new posts
-            new_posts = [p for p in posts if p.get("id") not in seen_ids]
+            page += 1
+            on_page(page, posts)
+            total_posts += len(posts)
 
-            if new_posts:
-                page += 1
-                on_page(page, new_posts)
-                total_posts += len(new_posts)
-                for p in new_posts:
-                    seen_ids.add(p.get("id"))
-                stale_pages = 0
-            else:
-                stale_pages += 1
-
-            # Check if we've hit target
-            if target_count > 0 and total_posts >= target_count:
+            if not result["has_more"]:
                 break
-
-            # Check if we're stuck
-            if stale_pages >= max_stale_pages:
+            cursor = result["next_cursor"]
+            if not cursor:
                 break
-
-            # Advance offset - jump around if seeing lots of duplicates
-            if len(new_posts) < len(posts) * 0.5:
-                offset = random.randint(0, max(target_count, 100000))
-            else:
-                offset += page_size
 
         return total_posts
 
@@ -437,10 +302,10 @@ class MoltbookClient:
             response.raise_for_status()
             data = response.json()
             stats = {
-                "agents": data.get("agents", 0),
-                "submolts": data.get("submolts", 0),
-                "posts": data.get("posts", 0),
-                "comments": data.get("comments", 0),
+                "agents": data.get("totalAgents", 0),
+                "submolts": data.get("totalSubmolts", 0),
+                "posts": data.get("totalPosts", 0),
+                "comments": data.get("totalComments", 0),
             }
             # Check if all values are non-zero
             if all(v > 0 for v in stats.values()):
@@ -451,6 +316,20 @@ class MoltbookClient:
 
         # Return best effort if we couldn't get all non-zero
         return stats
+
+    def fetch_submolt_detail(self, name: str) -> Optional[dict]:
+        """Fetch a submolt's full details by name. Returns None if not found."""
+        response = self._request(
+            "GET",
+            f"{self.BASE_URL}/submolts/{name}"
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        data = response.json()
+        if not data.get("success", False):
+            return None
+        return data["submolt"]
 
     def fetch_submolt_moderators(self, submolt_name: str) -> list[dict]:
         """Fetch moderators for a submolt. Returns empty list if not found or error."""
@@ -468,7 +347,11 @@ class MoltbookClient:
             return []
 
     def fetch_post_with_comments(self, post_id: str) -> Optional[dict]:
-        """Fetch a post with its comments. Returns None if not found."""
+        """Fetch a post with its comments. Returns None if not found.
+
+        Comments are fetched from the separate /posts/{id}/comments endpoint.
+        """
+        # Fetch post
         response = self._request(
             "GET",
             f"{self.BASE_URL}/posts/{post_id}"
@@ -479,7 +362,21 @@ class MoltbookClient:
         data = response.json()
         if not data.get("success", False):
             return None
+
+        # Fetch comments from separate endpoint
+        comments = []
+        try:
+            comments_response = self._request(
+                "GET",
+                f"{self.BASE_URL}/posts/{post_id}/comments"
+            )
+            if comments_response.status_code == 200:
+                comments_data = comments_response.json()
+                comments = comments_data.get("comments", [])
+        except Exception:
+            pass  # Return post with empty comments if comments fetch fails
+
         return {
             "post": data.get("post"),
-            "comments": data.get("comments", []),
+            "comments": comments,
         }

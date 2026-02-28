@@ -12,7 +12,7 @@ Academic research project for scraping and econometrically analyzing Moltbook, a
 moltbook_scraper/
 ├── src/                     # Python scraper (core data collection)
 │   ├── cli.py               # CLI entry point
-│   ├── client.py            # Moltbook API client with retry logic
+│   ├── client.py            # Moltbook API client with exponential backoff retry
 │   ├── database.py          # SQLite schema and operations
 │   └── scraper.py           # Scraping orchestration
 ├── analysis/
@@ -42,22 +42,21 @@ moltbook_scraper/
 
 ```bash
 # Full scrape (submolts, posts, comments, moderators, agents, snapshots)
-python -m src.cli full --db moltbook.db
+python -m src.cli full --db data/raw/moltbook.db
 
 # Incremental (new posts only)
-python -m src.cli incremental --db moltbook.db
+python -m src.cli incremental --db data/raw/moltbook.db
 
-# Individual commands
-python -m src.cli submolts --db moltbook.db
-python -m src.cli posts --db moltbook.db
-python -m src.cli comments --db moltbook.db
-python -m src.cli comments --db moltbook.db --only-missing  # Skip posts with comments
-python -m src.cli enrich --db moltbook.db
-python -m src.cli moderators --db moltbook.db
-python -m src.cli snapshots --db moltbook.db
+# Individual commands (preferred — staged scrape is resumable)
+python -m src.cli submolts --db data/raw/moltbook.db --log-file logs/scrape-submolts.log
+python -m src.cli posts --db data/raw/moltbook.db --log-file logs/scrape-posts.log
+python -m src.cli comments --only-missing --db data/raw/moltbook.db --log-file logs/scrape-comments.log
+python -m src.cli enrich --db data/raw/moltbook.db --log-file logs/scrape-enrich.log
+python -m src.cli moderators --db data/raw/moltbook.db --log-file logs/scrape-moderators.log
+python -m src.cli snapshots --db data/raw/moltbook.db
 
 # Database status
-python -m src.cli status --db moltbook.db
+python -m src.cli status --db data/raw/moltbook.db
 
 # Fetch platform documentation
 python -m src.cli docs
@@ -102,10 +101,11 @@ pdflatex moltbook_analysis.tex
 
 ### Database
 
-- SQLite database: `moltbook.db` (gitignored)
+- SQLite database: `data/raw/moltbook.db` (gitignored; will reach several GB after full scrape)
 - Snapshot tables record point-in-time data for reproducibility
 - Key tables: `agents`, `posts`, `comments`, `submolts`, `moderators`
 - Snapshot tables: `*_snapshots` with `scrape_run_id` for tracking
+- Full schema: `src/database.py:_create_tables()`; human-readable: `data/README.md`
 
 
 ## Code Conventions
@@ -114,9 +114,9 @@ pdflatex moltbook_analysis.tex
 
 - Type hints used throughout
 - Streaming/pagination with callbacks for large datasets
-- Retry logic with exponential backoff for flaky API
+- Retry logic with exponential backoff for 429s and 5xx (no proactive throttle)
 - UPSERT pattern with COALESCE for incremental updates
-- Validation against platform stats API
+- Validation against platform stats API (`/api/v1/stats` returns `totalAgents`, `totalPosts`, `totalComments`, `totalSubmolts`)
 
 ### R
 
@@ -129,10 +129,11 @@ pdflatex moltbook_analysis.tex
 
 ### API Limitations
 
-- Comments capped at 1,000 per post (impacts high-volume posts)
+- Comments capped at ~200 per request (not 1,000 — confirmed 2026-02-28); validation uses 80% tolerance
 - Follower/following graph not exposed (only counts)
-- Non-deterministic pagination requires streaming with deduplication
-- Rate limiting: 429 responses handled with exponential backoff
+- Posts use cursor-based pagination (`has_more` + `next_cursor`); submolts use page-based (`?page=N`, 20/page)
+- Embedded agent objects in API responses use camelCase keys (`avatarUrl` etc.); `_normalize_agent()` in `client.py` converts to snake_case before DB writes
+- Rate limiting: 429 responses handled with exponential backoff (no proactive throttle)
 
 ### Data Considerations
 
@@ -191,8 +192,8 @@ from the requirements.txt or the renv lock file
 ## Data Hygiene
 
 - Large databases (>100MB) should be stored in `data/raw/` which is added to `.gitignore`. Only `.rds` summaries go in `data/processed/`.
-- The default `--db moltbook.db` stores in project root; move to `data/raw/moltbook.db` once scraping is operational.
-- R scripts in `analysis/R/` expect the DB at `../../moltbook.db` (relative to their directory). Update `utils.R:connect_db()` if the DB path changes.
+- Always use `data/raw/moltbook.db` as the DB path — do not store the DB in the project root.
+- R scripts in `analysis/R/` expect the DB at `../../data/raw/moltbook.db` (relative to their directory). Update `utils.R:connect_db()` if the DB path changes.
 
 ## Methodology Log
 
@@ -210,3 +211,10 @@ from the requirements.txt or the renv lock file
 | 2026-02-13 | Proactive rate throttle (90/min sliding window) | Avoid 429 storms; maintain diagnostic logs | Active |
 | 2026-02-13 | PowerShell daily_scrape.ps1 replaces .sh       | Windows 11 environment; .sh kept for reference | Active |
 | 2026-02-13 | Context-economy rules in CLAUDE.md             | Prevent token burn on large logs, error loops, and DB dumps | Active |
+| 2026-02-28 | Removed sliding-window throttle from `client.py` | Cold-start burst caused cascading 429 storms; reactive exponential backoff (upstream approach) is sufficient | Active |
+| 2026-02-28 | Comment cap revised from 1,000 to ~200 per request | Live API confirmed lower cap; 80% validation tolerance unchanged | Active |
+| 2026-02-28 | Posts: cursor-based pagination (`has_more` + `next_cursor`) | API breaking change confirmed live; offset parameter no longer honoured | Active |
+| 2026-02-28 | Submolts: page-based pagination (`?page=N`, 20/page) | API breaking change; offset returned only first page then empty | Active |
+| 2026-02-28 | Comments: separate endpoint (`/posts/{id}/comments`) | API breaking change; comments no longer embedded in post response | Active |
+| 2026-02-28 | `_normalize_agent()` applied to all embedded author objects | API returns camelCase for embedded agents; DB schema expects snake_case | Active |
+| 2026-02-28 | HPC (`scripts/run_on_hpc.sh`) flagged for comments+enrich | 10-14 day comments and multi-week enrich are impractical on local machine; script needs cluster-specific info from user | Pending |

@@ -2,7 +2,7 @@
 
 from typing import Optional, Callable
 
-from src.client import MoltbookClient
+from src.client import MoltbookClient, _normalize_agent
 from src.database import Database
 
 
@@ -55,7 +55,7 @@ class Scraper:
             self._log(f"Skipping {entity} validation (platform reports 0)")
             return
 
-        # Comments have a known 1000-comment-per-post cap in the API,
+        # Comments have a known ~200-comment-per-request cap in the API,
         # so we can never reach the platform's reported total.
         # Allow up to 20% gap for comments.
         if entity == "comments":
@@ -100,6 +100,11 @@ class Scraper:
 
         def on_page(page_num, submolts):
             for submolt in submolts:
+                # Normalize created_by agent if present
+                if submolt.get("created_by") and isinstance(submolt["created_by"], dict):
+                    agent = _normalize_agent(submolt["created_by"])
+                    if agent.get("name"):
+                        self.db.upsert_agent(agent)
                 self.db.upsert_submolt(submolt)
             self.db.commit()
             total_saved[0] += len(submolts)
@@ -124,7 +129,9 @@ class Scraper:
             for post in posts:
                 self.db.upsert_post(post)
                 if post.get("author"):
-                    self.db.upsert_agent(post["author"])
+                    self.db.upsert_agent(_normalize_agent(post["author"]))
+                if post.get("submolt") and isinstance(post["submolt"], dict):
+                    self.db.upsert_submolt(post["submolt"])
             self.db.commit()
             total_saved[0] += len(posts)
             self._log(f"  Page {page_num}: saved {len(posts)} posts ({total_saved[0]} unique total)")
