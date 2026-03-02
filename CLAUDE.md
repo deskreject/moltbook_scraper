@@ -131,7 +131,7 @@ pdflatex moltbook_analysis.tex
 
 - Comments capped at ~200 per request (not 1,000 — confirmed 2026-02-28); validation uses 80% tolerance
 - Follower/following graph not exposed (only counts)
-- Posts use cursor-based pagination (`has_more` + `next_cursor`); submolts use page-based (`?page=N`, 20/page)
+- Posts use cursor-based pagination (`has_more` + `next_cursor`) with `sort=new` (required for full archive); `sort=hot` default caps at ~70K posts; submolts use page-based (`?page=N`, 20/page)
 - Embedded agent objects in API responses use camelCase keys (`avatarUrl` etc.); `_normalize_agent()` in `client.py` converts to snake_case before DB writes
 - Rate limiting: 429 responses handled with exponential backoff (no proactive throttle)
 
@@ -218,3 +218,7 @@ from the requirements.txt or the renv lock file
 | 2026-02-28 | Comments: separate endpoint (`/posts/{id}/comments`) | API breaking change; comments no longer embedded in post response | Active |
 | 2026-02-28 | `_normalize_agent()` applied to all embedded author objects | API returns camelCase for embedded agents; DB schema expects snake_case | Active |
 | 2026-02-28 | HPC (`scripts/run_on_hpc.sh`) flagged for comments+enrich | 10-14 day comments and multi-week enrich are impractical on local machine; script needs cluster-specific info from user | Pending |
+| 2026-03-02 | Posts scrape must use `sort=new` not default `sort=hot` | `sort=hot` is algorithmically capped at ~70K posts (exhausts score-based tail after ~700 pages, covering only ~3 days); `sort=new` traverses full chronological archive back to platform launch | Active |
+| 2026-03-02 | Platform launched ~Jan 15 2026 | Confirmed via cursor injection: no posts exist before Jan 15; platform is ~6 weeks old at time of scraping | Active |
+| 2026-03-02 | Cloud VM (Hetzner/DigitalOcean) as HPC alternative | Comments (~10-14 days) and enrich (weeks) need persistent uptime; cheap VM (~€5-10 total) is lower-friction than HPC for a researcher without cluster experience | Active |
+| 2026-03-02 | DB is portable via rsync; stages run on whichever machine holds the file | UPSERT design means cross-machine handoff is safe: copy file, continue scraping, copy back | Active |
