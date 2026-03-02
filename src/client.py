@@ -176,13 +176,18 @@ class MoltbookClient:
 
         return total
 
-    def fetch_posts(self, limit: int = 100, cursor: Optional[str] = None) -> dict:
+    def fetch_posts(self, limit: int = 100, cursor: Optional[str] = None, sort: str = "new") -> dict:
         """Fetch a page of posts from the API using cursor-based pagination.
+
+        Args:
+            sort: Sort order. "new" (chronological, full archive) or "hot" (score+recency,
+                  only returns recent high-engagement posts — caps at ~70K empirically).
+                  Default is "new" to ensure full corpus coverage.
 
         Returns:
             Dict with keys: posts, has_more, next_cursor
         """
-        params = {"limit": limit}
+        params = {"limit": limit, "sort": sort}
         if cursor:
             params["cursor"] = cursor
         response = self._request("GET", f"{self.BASE_URL}/posts", params=params)
@@ -229,6 +234,7 @@ class MoltbookClient:
         on_page: Callable[[int, list[dict]], None],
         target_count: int = 0,
         max_stale_pages: int = 20,
+        sort: str = "new",
     ) -> int:
         """Fetch all posts using cursor-based pagination, calling on_page with each batch.
 
@@ -236,6 +242,7 @@ class MoltbookClient:
             on_page: Callback called with (page_num, posts_list) for each page.
             target_count: Ignored (kept for caller compatibility).
             max_stale_pages: Ignored (kept for caller compatibility).
+            sort: Sort order passed to fetch_posts (default "new" for full archive).
 
         Returns:
             Total number of posts fetched.
@@ -248,7 +255,7 @@ class MoltbookClient:
 
         while True:
             try:
-                result = self.fetch_posts(limit=100, cursor=cursor)
+                result = self.fetch_posts(limit=100, cursor=cursor, sort=sort)
                 consecutive_errors = 0
             except Exception:
                 consecutive_errors += 1
