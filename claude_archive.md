@@ -4,6 +4,10 @@ Synthesized records of completed work from previous sessions. See `claude_handov
 
 ---
 
+## 2026-03-03 (session 6) — Three-stage speed optimization (Steps 1-3)
+
+Implemented and 30+ min tested three optimizations to reduce comment/enrich/moderator scrape duration: Step 1 (`--skip-empty`) skips 1.29M zero-comment posts (74% of corpus) via LEFT JOIN DB query, reducing comments requests 3.7×; Step 2 (`fetch_comments_only()`) drops the redundant `GET /posts/{id}` re-fetch and only calls `/posts/{id}/comments`, halving requests per post (~1.7× measured); Step 3 (`--workers N`) adds `ThreadPoolExecutor` concurrent HTTP workers with all DB writes in main thread + a shared `_TokenBucket` rate limiter (auto-enabled at 90 req/min when N>1) to prevent thundering herd 429s — without the bucket, 4 workers caused 16 req/min (worse than 1 worker); with bucket, moderators ran at ~43 req/min. All changes backward-compatible (`max_workers=1` default). Posts scrape already complete (1,742,447 posts). Moderators scrape running as of session end with `--workers 4`.
+
 ## 2026-03-02 (session 5) — sort=new fix, posts scrape restarted, HPC/alternatives assessment
 
 Removed stale `affectionate-lamport` worktree and branch (session 4 changes were already committed to main). Diagnosed why posts scrape exited at 69,974 posts: default `sort=hot` endpoint is algorithmically limited to the last ~3 days of high-engagement posts; confirmed via cursor injection that `sort=new` traverses the full chronological archive (platform launched ~Jan 15 2026); added `sort` parameter (default `"new"`) to `fetch_posts()` and `fetch_posts_streaming()` in `src/client.py`; re-launched posts scrape with `sort=new` (219K posts at session end, walking back to Jan 15). Also: assessed HPC strategy (key blocker is outbound HTTPS from compute nodes; DigitalOcean/Hetzner cheap VM recommended as alternative); documented that DB is portable via rsync and UPSERT design supports cross-machine workflow.
