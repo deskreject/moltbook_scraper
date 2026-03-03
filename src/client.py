@@ -1,9 +1,39 @@
 """Moltbook API client."""
 
+import threading
 import time
 from typing import Optional, Callable
 
 import requests
+
+
+class _TokenBucket:
+    """Thread-safe token bucket for rate-limiting concurrent workers.
+
+    Each call to acquire() blocks until a token is available. Workers share
+    one bucket so total request rate stays at or below the configured limit.
+    """
+
+    def __init__(self, rate_per_min: float, capacity: float):
+        self._rate = rate_per_min / 60.0  # tokens per second
+        self._capacity = capacity
+        self._tokens = capacity
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        """Block until one token is available, then consume it."""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last
+                self._last = now
+                self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
 
 
 class RateLimitError(Exception):
@@ -49,12 +79,23 @@ class MoltbookClient:
         max_retries: int = 3,
         base_delay: float = 1.0,
         on_request: Optional[Callable[[str], None]] = None,
+        rate_limit: Optional[float] = None,
     ):
+        """
+        Args:
+            rate_limit: Optional requests-per-minute cap shared across all workers.
+                        Set to ~90 when using concurrent workers to prevent thundering
+                        herd 429s. None (default) disables proactive throttling.
+        """
         self.api_key = api_key
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.on_request = on_request
         self.request_count = 0
+        self._throttle = (
+            _TokenBucket(rate_limit, capacity=max(4.0, rate_limit / 10.0))
+            if rate_limit else None
+        )
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {api_key}",
@@ -63,6 +104,11 @@ class MoltbookClient:
 
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         """Make a request with retry logic for rate limiting and server errors."""
+        # Proactive throttle: acquire a token before each attempt so concurrent
+        # workers stay below the API rate limit without thundering-herd 429s.
+        if self._throttle:
+            self._throttle.acquire()
+
         # Set default timeout if not provided
         if "timeout" not in kwargs:
             kwargs["timeout"] = 30
@@ -350,6 +396,31 @@ class MoltbookClient:
             response.raise_for_status()
             data = response.json()
             return data.get("moderators", [])
+        except Exception:
+            return []
+
+    def fetch_comments_only(self, post_id: str) -> list[dict]:
+        """Fetch comments for a post from the /posts/{id}/comments endpoint.
+
+        Does NOT re-fetch the post itself (use when the post is already in the DB).
+        Halves API requests vs fetch_post_with_comments() for the comments stage.
+
+        Args:
+            post_id: ID of the post to fetch comments for.
+
+        Returns:
+            List of comment dicts, or empty list if not found or on error.
+        """
+        try:
+            response = self._request(
+                "GET",
+                f"{self.BASE_URL}/posts/{post_id}/comments"
+            )
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            data = response.json()
+            return data.get("comments", [])
         except Exception:
             return []
 

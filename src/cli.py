@@ -114,6 +114,18 @@ def main():
         help="For comments: only fetch for posts without comments yet",
     )
     parser.add_argument(
+        "--skip-empty",
+        action="store_true",
+        help="For comments: skip posts where platform reports 0 comments (~74%% fewer requests)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Concurrent workers for per-item stages (comments, moderators, enrich). Default: 1 (sequential).",
+    )
+    parser.add_argument(
         "--log-file",
         default=None,
         help="Path to log file for diagnostics (throttle events, errors)",
@@ -174,8 +186,11 @@ def main():
     # Create client and scraper with progress callback
     # Use 5 retries with 2s base delay to handle API instability
     progress_fn = None if args.quiet else log
-    client = MoltbookClient(api_key=api_key, max_retries=5, base_delay=2.0)
-    scraper = Scraper(client, db, on_progress=progress_fn)
+    # Apply shared rate limit when running concurrent workers to prevent thundering
+    # herd 429s. 90 req/min is ~10% below the advertised 100 req/min limit.
+    rate_limit = 90.0 if args.workers > 1 else None
+    client = MoltbookClient(api_key=api_key, max_retries=5, base_delay=2.0, rate_limit=rate_limit)
+    scraper = Scraper(client, db, on_progress=progress_fn, max_workers=args.workers)
 
     try:
         if args.command == "full":
@@ -207,7 +222,7 @@ def main():
 
         elif args.command == "comments":
             log("Scraping comments...")
-            scraper.scrape_comments(only_missing=args.only_missing)
+            scraper.scrape_comments(only_missing=args.only_missing, skip_empty=args.skip_empty)
             log("Comments scrape complete.")
 
         elif args.command == "moderators":

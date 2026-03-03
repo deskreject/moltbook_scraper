@@ -349,6 +349,18 @@ class Database:
         cursor = self.conn.execute("SELECT id FROM posts")
         return [row[0] for row in cursor.fetchall()]
 
+    def get_all_post_ids_with_activity(self) -> list[str]:
+        """Get IDs of all posts with comment_count > 0, ordered by comment_count DESC.
+
+        Used with --skip-empty when re-fetching all posts. Skips posts the
+        platform itself reports as having zero comments. Ordered so the
+        most-discussed posts are processed first.
+        """
+        cursor = self.conn.execute(
+            "SELECT id FROM posts WHERE comment_count > 0 ORDER BY comment_count DESC"
+        )
+        return [row[0] for row in cursor.fetchall()]
+
     def get_comment_count(self) -> int:
         """Get total number of comments in the database."""
         return self.conn.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
@@ -362,6 +374,21 @@ class Database:
             SELECT id FROM posts
             WHERE id NOT IN (SELECT DISTINCT post_id FROM comments)
             ORDER BY comment_count DESC
+        """)
+        return [row[0] for row in cursor.fetchall()]
+
+    def get_post_ids_without_comments_with_activity(self) -> list[str]:
+        """Get IDs of posts that have comment_count > 0 and no scraped comments yet.
+
+        Used with --skip-empty to avoid issuing 1.29M requests for posts the
+        platform itself reports as having zero comments. Ordered by comment_count
+        DESC so the most-discussed posts are processed first.
+        """
+        cursor = self.conn.execute("""
+            SELECT p.id FROM posts p
+            LEFT JOIN comments c ON c.post_id = p.id
+            WHERE p.comment_count > 0 AND c.id IS NULL
+            ORDER BY p.comment_count DESC
         """)
         return [row[0] for row in cursor.fetchall()]
 

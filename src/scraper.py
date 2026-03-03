@@ -1,5 +1,6 @@
 """Scraper orchestration for Moltbook."""
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Callable
 
 from src.client import MoltbookClient, _normalize_agent
@@ -19,10 +20,12 @@ class Scraper:
         client: MoltbookClient,
         db: Database,
         on_progress: Optional[Callable[[str], None]] = None,
+        max_workers: int = 1,
     ):
         self.client = client
         self.db = db
         self.on_progress = on_progress
+        self.max_workers = max_workers
         self._baseline_counts = None
 
     def _log(self, message: str):
@@ -196,20 +199,43 @@ class Scraper:
 
         total_mods = 0
         error_count = 0
-        for i, name in enumerate(submolt_names):
-            try:
-                moderators = self.client.fetch_submolt_moderators(name)
-                for mod in moderators:
-                    agent_name = mod.get("agent", {}).get("name") or mod.get("name")
-                    if agent_name:
-                        self.db.upsert_moderator(name, agent_name, mod.get("role"))
-                        total_mods += 1
-                self.db.commit()
-            except Exception:
-                error_count += 1
 
-            if (i + 1) % 100 == 0:
-                self._log(f"  Progress: {i + 1}/{len(submolt_names)} ({total_mods} moderators, {error_count} errors)")
+        if self.max_workers <= 1:
+            # Sequential path
+            for i, name in enumerate(submolt_names):
+                try:
+                    moderators = self.client.fetch_submolt_moderators(name)
+                    for mod in moderators:
+                        agent_name = mod.get("agent", {}).get("name") or mod.get("name")
+                        if agent_name:
+                            self.db.upsert_moderator(name, agent_name, mod.get("role"))
+                            total_mods += 1
+                    self.db.commit()
+                except Exception:
+                    error_count += 1
+                if (i + 1) % 100 == 0:
+                    self._log(f"  Progress: {i + 1}/{len(submolt_names)} ({total_mods} moderators, {error_count} errors)")
+        else:
+            # Concurrent path: HTTP in worker threads, DB writes in main thread
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_name = {
+                    executor.submit(self.client.fetch_submolt_moderators, name): name
+                    for name in submolt_names
+                }
+                for i, future in enumerate(as_completed(future_to_name)):
+                    name = future_to_name[future]
+                    try:
+                        moderators = future.result()
+                        for mod in moderators:
+                            agent_name = mod.get("agent", {}).get("name") or mod.get("name")
+                            if agent_name:
+                                self.db.upsert_moderator(name, agent_name, mod.get("role"))
+                                total_mods += 1
+                        self.db.commit()
+                    except Exception:
+                        error_count += 1
+                    if (i + 1) % 100 == 0:
+                        self._log(f"  Progress: {i + 1}/{len(submolt_names)} ({total_mods} moderators, {error_count} errors)")
 
         self._log(f"Stored {total_mods} moderator relationships ({error_count} errors)")
 
@@ -220,55 +246,104 @@ class Scraper:
 
         success_count = 0
         error_count = 0
-        for i, name in enumerate(agents):
-            try:
-                profile = self.client.fetch_agent_profile(name)
-                if profile:
-                    self.db.upsert_agent(profile)
-                    success_count += 1
-            except Exception as e:
-                error_count += 1
-                # Don't log every error, just track count
-            if (i + 1) % 100 == 0:
-                self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {error_count} errors)")
+
+        if self.max_workers <= 1:
+            # Sequential path
+            for i, name in enumerate(agents):
+                try:
+                    profile = self.client.fetch_agent_profile(name)
+                    if profile:
+                        self.db.upsert_agent(profile)
+                        success_count += 1
+                except Exception:
+                    error_count += 1
+                if (i + 1) % 100 == 0:
+                    self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {error_count} errors)")
+        else:
+            # Concurrent path: HTTP in worker threads, DB writes in main thread
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_name = {
+                    executor.submit(self.client.fetch_agent_profile, name): name
+                    for name in agents
+                }
+                for i, future in enumerate(as_completed(future_to_name)):
+                    name = future_to_name[future]
+                    try:
+                        profile = future.result()
+                        if profile:
+                            self.db.upsert_agent(profile)
+                            success_count += 1
+                    except Exception:
+                        error_count += 1
+                    if (i + 1) % 100 == 0:
+                        self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {error_count} errors)")
 
         self._log(f"Enriched {success_count} agents ({error_count} errors)")
 
-    def scrape_comments(self, only_missing: bool = False):
+    def scrape_comments(self, only_missing: bool = False, skip_empty: bool = False):
         """Fetch comments for posts.
 
         Args:
             only_missing: If True, only fetch comments for posts without any comments.
                          If False, fetch for all posts (updates existing).
+            skip_empty: If True, skip posts where comment_count == 0 (platform reports
+                        no comments). Reduces API requests by ~74% on the current corpus.
         """
         baseline = self._load_baseline()
         target = baseline.get("comments", 0)
 
-        if only_missing:
+        if only_missing and skip_empty:
+            post_ids = self.db.get_post_ids_without_comments_with_activity()
+            self._log(f"Fetching comments for {len(post_ids)} posts (missing only, skip empty)...")
+        elif only_missing:
             post_ids = self.db.get_post_ids_without_comments()
             self._log(f"Fetching comments for {len(post_ids)} posts (missing only)...")
+        elif skip_empty:
+            post_ids = self.db.get_all_post_ids_with_activity()
+            self._log(f"Fetching comments for {len(post_ids)} posts (skip empty)...")
         else:
             post_ids = self.db.get_all_post_ids()
             self._log(f"Fetching comments for {len(post_ids)} posts (target: ~{target} comments)...")
 
         total_comments = 0
         error_count = 0
-        for i, post_id in enumerate(post_ids):
-            try:
-                result = self.client.fetch_post_with_comments(post_id)
-                if result and result.get("comments"):
-                    comments = result["comments"]
-                    self._store_comments_recursive(comments, post_id)
-                    total_comments += self._count_comments_recursive(comments)
-                    self.db.commit()
-            except Exception as e:
-                error_count += 1
-                # Log first few errors for debugging
-                if error_count <= 5:
-                    self._log(f"  Error fetching comments for post {post_id}: {type(e).__name__}: {e}")
 
-            if (i + 1) % 50 == 0:
-                self._log(f"  Progress: {i + 1}/{len(post_ids)} posts ({total_comments} comments, {error_count} errors)")
+        if self.max_workers <= 1:
+            # Sequential path
+            for i, post_id in enumerate(post_ids):
+                try:
+                    comments = self.client.fetch_comments_only(post_id)
+                    if comments:
+                        self._store_comments_recursive(comments, post_id)
+                        total_comments += self._count_comments_recursive(comments)
+                        self.db.commit()
+                except Exception as e:
+                    error_count += 1
+                    if error_count <= 5:
+                        self._log(f"  Error fetching comments for post {post_id}: {type(e).__name__}: {e}")
+                if (i + 1) % 50 == 0:
+                    self._log(f"  Progress: {i + 1}/{len(post_ids)} posts ({total_comments} comments, {error_count} errors)")
+        else:
+            # Concurrent path: HTTP in worker threads, DB writes in main thread
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_pid = {
+                    executor.submit(self.client.fetch_comments_only, pid): pid
+                    for pid in post_ids
+                }
+                for i, future in enumerate(as_completed(future_to_pid)):
+                    post_id = future_to_pid[future]
+                    try:
+                        comments = future.result()
+                        if comments:
+                            self._store_comments_recursive(comments, post_id)
+                            total_comments += self._count_comments_recursive(comments)
+                            self.db.commit()
+                    except Exception as e:
+                        error_count += 1
+                        if error_count <= 5:
+                            self._log(f"  Error fetching comments for post {post_id}: {type(e).__name__}: {e}")
+                    if (i + 1) % 50 == 0:
+                        self._log(f"  Progress: {i + 1}/{len(post_ids)} posts ({total_comments} comments, {error_count} errors)")
 
         self._log(f"Stored {total_comments} comments ({error_count} errors)")
 
