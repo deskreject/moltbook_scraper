@@ -93,7 +93,7 @@ class MoltbookClient:
         self.on_request = on_request
         self.request_count = 0
         self._throttle = (
-            _TokenBucket(rate_limit, capacity=max(4.0, rate_limit / 10.0))
+            _TokenBucket(rate_limit, capacity=1.0)
             if rate_limit else None
         )
         self.session = requests.Session()
@@ -104,16 +104,18 @@ class MoltbookClient:
 
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         """Make a request with retry logic for rate limiting and server errors."""
-        # Proactive throttle: acquire a token before each attempt so concurrent
-        # workers stay below the API rate limit without thundering-herd 429s.
-        if self._throttle:
-            self._throttle.acquire()
-
         # Set default timeout if not provided
         if "timeout" not in kwargs:
             kwargs["timeout"] = 30
 
         for attempt in range(self.max_retries + 1):
+            # Acquire a token before EVERY attempt (including retries) so that
+            # retries also count against the rate limit. Placing acquire() outside
+            # the loop (previous behaviour) caused retries to bypass the bucket,
+            # multiplying actual HTTP requests by up to (1 + max_retries) = 6x.
+            if self._throttle:
+                self._throttle.acquire()
+
             self.request_count += 1
             if self.on_request:
                 self.on_request(url)
@@ -404,6 +406,7 @@ class MoltbookClient:
 
         Does NOT re-fetch the post itself (use when the post is already in the DB).
         Halves API requests vs fetch_post_with_comments() for the comments stage.
+        Requests limit=500 (server hard cap) to maximise comment coverage per request.
 
         Args:
             post_id: ID of the post to fetch comments for.
@@ -414,7 +417,8 @@ class MoltbookClient:
         try:
             response = self._request(
                 "GET",
-                f"{self.BASE_URL}/posts/{post_id}/comments"
+                f"{self.BASE_URL}/posts/{post_id}/comments",
+                params={"limit": 500},
             )
             if response.status_code == 404:
                 return []

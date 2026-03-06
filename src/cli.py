@@ -130,6 +130,17 @@ def main():
         default=None,
         help="Path to log file for diagnostics (throttle events, errors)",
     )
+    parser.add_argument(
+        "--rate-limit",
+        type=float,
+        default=None,
+        metavar="RPM",
+        help=(
+            "Requests-per-minute cap shared across all workers (token bucket). "
+            "Default: 90 when --workers > 1, unlimited when --workers 1. "
+            "Lower to be more conservative; raise only if API confirms higher tolerance."
+        ),
+    )
     args = parser.parse_args()
 
     # Set up logging (stderr always; file if --log-file provided)
@@ -187,8 +198,15 @@ def main():
     # Use 5 retries with 2s base delay to handle API instability
     progress_fn = None if args.quiet else log
     # Apply shared rate limit when running concurrent workers to prevent thundering
-    # herd 429s. 90 req/min is ~10% below the advertised 100 req/min limit.
-    rate_limit = 90.0 if args.workers > 1 else None
+    # herd 429s. Default 55 req/min is ~8% below the confirmed production limit of
+    # 60 req/min (X-RateLimit-Limit: 60 observed live 2026-03-06; source code said
+    # 100 but production config differs). Override via --rate-limit if needed.
+    if args.rate_limit is not None:
+        rate_limit = args.rate_limit
+    elif args.workers > 1:
+        rate_limit = 55.0
+    else:
+        rate_limit = None
     client = MoltbookClient(api_key=api_key, max_retries=5, base_delay=2.0, rate_limit=rate_limit)
     scraper = Scraper(client, db, on_progress=progress_fn, max_workers=args.workers)
 

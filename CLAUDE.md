@@ -48,11 +48,12 @@ python -m src.cli full --db data/raw/moltbook.db
 python -m src.cli incremental --db data/raw/moltbook.db
 
 # Individual commands (preferred — staged scrape is resumable)
-python -m src.cli submolts --db data/raw/moltbook.db --log-file logs/scrape-submolts.log
-python -m src.cli posts --db data/raw/moltbook.db --log-file logs/scrape-posts.log
-python -m src.cli comments --only-missing --db data/raw/moltbook.db --log-file logs/scrape-comments.log
-python -m src.cli enrich --db data/raw/moltbook.db --log-file logs/scrape-enrich.log
-python -m src.cli moderators --db data/raw/moltbook.db --log-file logs/scrape-moderators.log
+# IMPORTANT: always use -u (unbuffered stdout) for background runs so errors surface in log
+python -u -m src.cli submolts --db data/raw/moltbook.db --log-file logs/scrape-submolts.log
+python -u -m src.cli posts --db data/raw/moltbook.db --log-file logs/scrape-posts.log
+python -u -m src.cli comments --only-missing --skip-empty --workers 16 --db data/raw/moltbook.db --log-file logs/scrape-comments.log
+python -u -m src.cli enrich --workers 16 --db data/raw/moltbook.db --log-file logs/scrape-enrich.log
+python -u -m src.cli moderators --workers 4 --db data/raw/moltbook.db --log-file logs/scrape-moderators.log
 python -m src.cli snapshots --db data/raw/moltbook.db
 
 # Database status
@@ -129,7 +130,7 @@ pdflatex moltbook_analysis.tex
 
 ### API Limitations
 
-- Comments capped at ~200 per request (not 1,000 — confirmed 2026-02-28); validation uses 80% tolerance
+- Comments: server default is 100/request, hard cap 500 (confirmed 2026-03-05 via API source); scraper passes `limit=500` to maximise coverage; validation uses 80% tolerance
 - Follower/following graph not exposed (only counts)
 - Posts use cursor-based pagination (`has_more` + `next_cursor`) with `sort=new` (required for full archive); `sort=hot` default caps at ~70K posts; submolts use page-based (`?page=N`, 20/page)
 - Embedded agent objects in API responses use camelCase keys (`avatarUrl` etc.); `_normalize_agent()` in `client.py` converts to snake_case before DB writes
@@ -225,4 +226,11 @@ from the requirements.txt or the renv lock file
 | 2026-03-03 | `--skip-empty` flag skips 74% of posts with comment_count=0 | 1,288,777 of 1,742,447 posts have no comments; skipping them reduces comment-stage requests from 1.74M to 453K (3.7×) | Active |
 | 2026-03-03 | `fetch_comments_only()` halves comment-stage requests | Posts are already in DB; only `/posts/{id}/comments` needed, not `/posts/{id}` — saves 1 req/post (~1.7× measured speedup) | Active |
 | 2026-03-03 | `--workers N` adds ThreadPoolExecutor; DB writes stay in main thread | Workers do HTTP only to avoid SQLite check_same_thread; `--workers 4` auto-enables token bucket at 90 req/min; without bucket 4 workers caused thundering herd (16 req/min < 1 worker) | Active |
-| 2026-03-03 | Token bucket at 90 req/min required for concurrent workers | Reactive exponential backoff is insufficient for multiple workers (synchronized 429 storms); proactive bucket spaces requests evenly; bucket auto-enabled when --workers > 1 | Active |
+| 2026-03-03 | Token bucket required for concurrent workers; acquire() must be inside retry loop | Without bucket: thundering herd 429s; with bucket outside retry loop: retries bypass it, multiplying HTTP rate by up to 6×; acquire() must be called per HTTP attempt | Active |
+| 2026-03-05 | Global rate limit: source code says 100/min, production is 60/min | `X-RateLimit-Limit: 60` observed in live response headers 2026-03-06; source code (`rateLimit.js`) said 100 but production config differs; token bucket default corrected to 55/min; do NOT raise without re-checking header | Active |
+| 2026-03-05 | Comments fetch uses `limit=500` (server hard cap) | Default was 100; cap confirmed 500 via `src/routes/posts.js`; one request still per post | Active |
+| 2026-03-05 | Use `python -u` for all background scrapes | Block-buffered stdout causes silent error loss when process dies; `-u` makes output appear immediately in task file | Active |
+| 2026-03-05 | Comments scrape runs at --workers 16 | Heavy posts (first ~19K) bottlenecked on API latency (~22s/req); light remainder (avg 7.3 comments) bottlenecks on token bucket; 16 workers saturates the 90/min cap | Active |
+| 2026-03-05 | Do not auto-start enrich after comments | User evaluating second API token and cloud VM options first | Pending |
+| 2026-03-06 | Token bucket capacity must be 1.0 (no burst) | capacity=9 caused up to 9 simultaneous requests; combined with retries-bypassing-bucket bug, produced 540 HTTP req/min against 60/min limit; 10h of abuse triggered infrastructure block | Active |
+| 2026-03-06 | Confirmed production rate limit is 60/min not 100/min | Live header `X-RateLimit-Limit: 60`; token bucket default corrected to 55/min; second API key = independent 60/min window | Active |
