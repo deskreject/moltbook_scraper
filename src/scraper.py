@@ -239,9 +239,17 @@ class Scraper:
 
         self._log(f"Stored {total_mods} moderator relationships ({error_count} errors)")
 
-    def enrich_agents(self):
-        """Fetch full profiles for all known agents."""
-        agents = self.db.get_all_agent_names()
+    def enrich_agents(self, only_missing: bool = False):
+        """Fetch full profiles for agents.
+
+        Args:
+            only_missing: If True, only enrich agents without a description (stubs).
+                         If False, enrich all agents (re-fetches already-enriched ones).
+        """
+        if only_missing:
+            agents = self.db.get_unenriched_agent_names()
+        else:
+            agents = self.db.get_all_agent_names()
         self._log(f"Enriching {len(agents)} agent profiles...")
 
         success_count = 0

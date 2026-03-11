@@ -1,148 +1,89 @@
 # Claude Handover - Moltbook Scraper
 
-**Last updated**: 2026-03-06 (end of session 8)
-**Git state**: Branch `main`, 4 commits ahead of origin/main (not yet pushed); 6 files locally modified (uncommitted — see below)
-**Machine**: Windows 11, Python 3.14.0, venv at `.venv/`
+**Last updated**: 2026-03-11 (session 9)
+**Git state**: Branch `main`, clean after this commit
+**Local machine**: Windows 11, Python 3.14.0, venv at `.venv/`
 
 ---
 
-## Active process
+## Current DB State (2026-03-11)
 
-**No scraper running.** All processes were stopped at end of session 8.
+| Table | Count | Status |
+|-------|-------|--------|
+| posts | 1,742,447 | Complete (93.4% of platform's 2.01M) |
+| submolts | 18,673 | Complete (97.0% of platform's 19,241) |
+| moderators | 13,741 | Complete |
+| comments | 2,725,187 | Complete (167 posts unreachable — stale comment_count, API returns empty) |
+| agents | 166,998 | Complete. 7,160 have no description (genuinely unset on platform, not a scraping gap) |
+| snapshots | 1,742,447 post / 2,725,187 comment / 166,998 agent / 18,673 submolt / 13,741 mod | Created 2026-03-11 |
 
-**IP is currently blocked** at the infrastructure level (Cloudflare/nginx). The block does NOT return `X-RateLimit-*` headers — it is not the application-level 60/min limit. Caused by ~10 hours of 540 req/min (token bucket bug). Cooldown is 15+ minutes; may already have cleared by next session.
-
-**To test if block has cleared:**
-```powershell
-# Quick API test — if 200, block is cleared
-.venv\Scripts\python -c "from src.client import MoltbookClient; import os; c = MoltbookClient(os.getenv('MOLTBOOK_API_KEY')); r = c._request('GET', c.BASE_URL + '/stats'); print(f'status={r.status_code}'); print({h: r.headers[h] for h in r.headers if 'ratelimit' in h.lower()})"
-```
-
----
-
-## Current DB state (2026-03-06)
-
-| Table | Count |
-|-------|-------|
-| posts | 1,742,447 |
-| agents (stubs) | 165,604 |
-| submolts | 18,673 |
-| comments | ~600K (done for ~19,646 / 453,670 posts) |
-| moderators | 13,741 rows (13,645 submolts with mods) |
+**DB size**: 5.7 GB (3.0 GB live + 2.7 GB snapshots)
+**DB path**: `data/raw/moltbook.db`
 
 ---
 
-## Next Immediate Steps
+## Scraping Complete — All Stages Done
 
-### 1. Resume comments scrape (SEQUENTIAL — do not use workers)
+All scraping stages are finished. The data is ready for analysis.
 
-Once IP block clears (or after switching VPN server):
-```powershell
-# Sequential mode — NO --workers flag, NO token bucket
-# Achieves ~25 req/min, well under 60/min limit, zero 429s
-.venv\Scripts\python -u -m src.cli comments --only-missing --skip-empty --db data/raw/moltbook.db --log-file logs/scrape-comments.log
+### Comments scrape (Hetzner VM)
+- **Ran**: 2026-03-06 14:27 → 2026-03-10 21:13 UTC (~4.7 days)
+- **Result**: 433,850/433,855 posts processed, 2,066,042 comments, 8 errors, 63 rate-limits
+- **Mop-up** (2026-03-11): 2,725 remaining posts → 29,918 additional comments, 0 errors
+- **Unreachable**: 167 posts have `comment_count > 0` but API returns empty (stale counts, likely deleted comments)
+
+### Agent enrichment
+- 7,159/7,160 stubs enriched (1 likely-deleted agent). All stubs genuinely have no description (bio not set on platform).
+- Added `--only-missing` flag to `enrich` command to avoid re-fetching all 166K agents (~111h) vs only stubs (~48 min).
+
+---
+
+## Hetzner VM — Ready to Delete
+
+**VM**: Hetzner CX23, Nuremberg, IP `159.69.34.240`, Ubuntu 24.04
+**Cost**: ~€0.43/day. Running since 2026-03-06 ≈ €2.15 total.
+**Status**: Scraper stopped, watchdog still running. DB copied to local. Safe to delete.
+**Backups on VM**: 3 rolling backups in `~/moltbook_scraper/data/backups/`
+
+---
+
+## Next Steps
+
+### 1. Run R analysis pipeline
+```bash
+cd analysis/R
+Rscript 01_load_data.R   # Creates analysis/data/*.rds from snapshots
+Rscript 02_structural.R  # Power-law fits, Gini, growth plots
+# ... etc.
 ```
 
-**DO NOT use `--workers > 1`** — see `readme_api_limit.md` for full analysis. Sequential is 2.5x faster than concurrent for this API.
-
-Remaining: ~434K posts × 25 req/min ≈ **12 days** on single machine.
-
-### 2. When comments complete: STOP — do not auto-start enrich
-
-User wants to evaluate parallelization options first:
-- **Option A: Second API token + different IP** — each machine runs sequential with its own token from a different IP; UPSERT design handles merge
-- **Option B: Cloud VM** — Hetzner CX22 (~€5/2 weeks) or DigitalOcean Basic (~$7/2 weeks); rsync DB to VM, run there, rsync back
-- **Option C: University HPC** — outbound HTTPS from compute nodes is the key question for IT
-
-**Critical**: Multiple tokens from the same IP do NOT help — infrastructure blocks by IP, not by token.
-
-### 3. Snapshots (run locally after comments complete)
-```powershell
-.venv\Scripts\python -m src.cli snapshots --db data/raw/moltbook.db
-```
-Takes <1 min; required before R analysis.
-
-### 4. Enrich agents (~165,604 stubs)
-Run sequential (1 worker). At ~25 req/min: 165,604 / 25 ≈ 4.6 days.
-Cloud VM or second IP recommended to parallelize.
-
-### 5. Fix pre-existing test failure
+### 2. Fix pre-existing test failure
 `test_fetch_all_posts_paginates_until_no_more` — needs update for cursor-based pagination and `sort` parameter.
 
-### 6. Commit and push sessions 7–8 changes
-```bash
-git add src/cli.py src/client.py CLAUDE.md claude_handover.md claude_archive.md readme_api_limit.md
-git commit -m "Sessions 7-8: rate limit fixes, limit=500, --rate-limit flag, API investigation docs"
-git push origin main
-```
+### 3. Delete Hetzner VM
+From Hetzner Cloud console. Stop billing.
 
 ---
 
-## Rate Limit — Key Findings (session 8)
+## Rate Limiting — Key Facts
 
-Full investigation documented in **`readme_api_limit.md`**.
+Full investigation: `readme_api_limit.md`
 
-### Two-layer rate limiting
-| Layer | Identifier | Limit | Cooldown | Headers |
-|-------|-----------|-------|----------|---------|
-| Application (`rateLimit.js`) | API token | 60/min | 1 minute | Yes (`X-RateLimit-*`) |
-| Infrastructure (Cloudflare/nginx) | IP address | Unknown | 15+ minutes | No |
+| Layer | Identifier | Limit | Cooldown |
+|-------|-----------|-------|----------|
+| Application | API token | 60/min (header says 60, source says 100) | 1 min |
+| Infrastructure | IP address | Unknown (>150/min from VM) | 15+ min |
 
-### Why sequential beats concurrent
-- Sequential (1 worker, no bucket): ~25 req/min, zero 429s, network latency bound
-- Concurrent (16 workers, 55/min bucket): ~10 req/min, constant 429s, token contention
-- **Correct parallelism**: multiple machines/IPs, each running sequential
-
-### Bugs fixed this session
-1. Token bucket `capacity=9` → `capacity=1.0` (no burst)
-2. `acquire()` moved inside retry loop (retries were bypassing bucket — 6x actual HTTP rate)
-3. Default rate corrected from 90 → 55/min (production limit is 60, not 100)
-
----
-
-## Cloud VM / Second Token Strategy
-
-### Key constraint: different IPs required
-Multiple tokens from the same IP share the infrastructure-level block. Each parallel scraper needs:
-- A **different IP address** (cloud VM, different VPN server, etc.)
-- A **different API token**
-- A **subset of post_ids** (split by rowid range)
-- **Sequential mode** (1 worker, no token bucket)
-
-### rsync workflow
-```bash
-# Push to VM
-rsync -avz --progress data/raw/moltbook.db user@vm-ip:~/moltbook_scraper/data/raw/moltbook.db
-
-# Pull back
-rsync -avz --progress user@vm-ip:~/moltbook_scraper/data/raw/moltbook.db data/raw/moltbook.db
-```
-UPSERT design means merge is always safe.
-
----
-
-## Uncommitted Changes (sessions 7–8)
-
-| File | Change |
-|------|--------|
-| `src/cli.py` | Added `--rate-limit RPM` flag; default when workers>1 corrected from 90 → 55/min |
-| `src/client.py` | `fetch_comments_only()` passes `limit=500`; `_TokenBucket` capacity=1.0 (no burst); `acquire()` moved inside retry loop |
-| `CLAUDE.md` | Rate limit corrected to 60/min production; methodology log updated |
-| `claude_handover.md` | This file |
-| `claude_archive.md` | Sessions 7–8 entries |
-| `readme_api_limit.md` | **NEW** — comprehensive rate limit investigation log |
+**Proven approach**: Sequential (1 worker, no token bucket), reactive exponential backoff. Achieves ~25-150 req/min depending on endpoint weight. Zero sustained 429s. Multi-worker is slower (see `readme_api_limit.md`).
 
 ---
 
 ## Key Reference
 
-- **DB path**: `data/raw/moltbook.db`
+- **DB path**: `data/raw/moltbook.db` (5.7 GB with snapshots)
 - **DB write behaviour**: UPSERT throughout — re-running any stage is safe
-- **Schema**: `src/database.py:_create_tables()` authoritative; human-readable: `data/README.md`
-- **Background scrapes**: always use `python -u` flag (unbuffered stdout)
-- **Rate limit docs**: `readme_api_limit.md` — read before changing any rate limit settings
-- **Upstream**: `daveholtz/moltbook_scraper` — run `git fetch upstream` before each session
-- **Platform scale** (2026-03-06): ~2.85M agents, ~1.87M posts, ~12.9M comments
-- **Platform launched**: ~Jan 15, 2026
-- **Completed work archive**: `claude_archive.md`
-- **Git commits not yet pushed**: 4 (fc8a489, 550ea29, 3542aa1, e448cf5)
+- **Schema**: `src/database.py:_create_tables()`; human-readable: `data/README.md`
+- **Rate limit docs**: `readme_api_limit.md`
+- **Comment hard cap**: 500/post, no pagination (API limitation)
+- **Upstream**: `daveholtz/moltbook_scraper` — sequential, no workers, no token bucket
+- **Platform scale** (2026-03-11): ~2.86M agents, ~2.01M posts, ~13.21M comments, ~19.2K submolts

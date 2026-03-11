@@ -235,7 +235,7 @@ def main():
 
         elif args.command == "enrich":
             log("Enriching agent profiles...")
-            scraper.enrich_agents()
+            scraper.enrich_agents(only_missing=args.only_missing)
             log("Agent enrichment complete.")
 
         elif args.command == "comments":

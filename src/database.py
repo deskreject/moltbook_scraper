@@ -344,6 +344,13 @@ class Database:
         cursor = self.conn.execute("SELECT name FROM agents")
         return [row[0] for row in cursor.fetchall()]
 
+    def get_unenriched_agent_names(self) -> list[str]:
+        """Get agent names that have no description (stubs from embedded objects)."""
+        cursor = self.conn.execute(
+            "SELECT name FROM agents WHERE description IS NULL"
+        )
+        return [row[0] for row in cursor.fetchall()]
+
     def get_all_post_ids(self) -> list[str]:
         """Get all post IDs in the database."""
         cursor = self.conn.execute("SELECT id FROM posts")

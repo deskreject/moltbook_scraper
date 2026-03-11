@@ -230,7 +230,14 @@ from the requirements.txt or the renv lock file
 | 2026-03-05 | Global rate limit: source code says 100/min, production is 60/min | `X-RateLimit-Limit: 60` observed in live response headers 2026-03-06; source code (`rateLimit.js`) said 100 but production config differs; token bucket default corrected to 55/min; do NOT raise without re-checking header | Active |
 | 2026-03-05 | Comments fetch uses `limit=500` (server hard cap) | Default was 100; cap confirmed 500 via `src/routes/posts.js`; one request still per post | Active |
 | 2026-03-05 | Use `python -u` for all background scrapes | Block-buffered stdout causes silent error loss when process dies; `-u` makes output appear immediately in task file | Active |
-| 2026-03-05 | Comments scrape runs at --workers 16 | Heavy posts (first ~19K) bottlenecked on API latency (~22s/req); light remainder (avg 7.3 comments) bottlenecks on token bucket; 16 workers saturates the 90/min cap | Active |
+| 2026-03-05 | Comments scrape runs sequential (1 worker, no token bucket) | Multi-worker approach is slower than sequential for this API (see readme_api_limit.md); sequential achieves ~25-150 req/min depending on post weight, zero 429s | Active |
 | 2026-03-05 | Do not auto-start enrich after comments | User evaluating second API token and cloud VM options first | Pending |
 | 2026-03-06 | Token bucket capacity must be 1.0 (no burst) | capacity=9 caused up to 9 simultaneous requests; combined with retries-bypassing-bucket bug, produced 540 HTTP req/min against 60/min limit; 10h of abuse triggered infrastructure block | Active |
 | 2026-03-06 | Confirmed production rate limit is 60/min not 100/min | Live header `X-RateLimit-Limit: 60`; token bucket default corrected to 55/min; second API key = independent 60/min window | Active |
+| 2026-03-06 | Sequential is faster than concurrent for this API | 1 worker ~25-150/min (zero 429s); 16 workers ~10/min (constant 429s); correct parallelism is across machines/IPs | Active |
+| 2026-03-06 | Hetzner VM for long-running scrapes | CX23 Nuremberg, ~€0.43/day; lower latency → higher throughput; tmux + watchdog for resilience; DB copied back via scp | Active |
+| 2026-03-06 | Comment API hard cap: 500/post, no pagination | Posts with >500 comments are truncated to top 500; affects 1,507 remaining posts; sufficient for research purposes | Active |
+| 2026-03-06 | Agent enrichment: only 7,188 stubs (not 166K) | 158,880 agents already have descriptions from embedded API objects; enrich stage is ~50 min on VM | Active |
+| 2026-03-06 | ExtraE113/moltbook_data has only ~165K posts (9%) | Uses offset-based pagination which hits API depth cap; our cursor-based scrape (1.74M posts, 93%) is irreplaceable | Active |
+| 2026-03-11 | All scraping stages complete | Comments: 2,725,187 (167 unreachable posts); agents: 166,998 (7,160 genuinely have no description); snapshots created | Complete |
+| 2026-03-11 | `--only-missing` flag for `enrich` command | Prevents re-fetching 166K agents (~111h) when only stubs need enrichment (~48 min); added `get_unenriched_agent_names()` to DB | Active |
