@@ -191,13 +191,134 @@ class Database:
             );
         """)
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self):
+        """Run schema migrations. Each migration is idempotent via try/except."""
+        migrations = {
+            # Migration 1: Comment deletion tracking
+            "comments": [
+                ("is_deleted", "INTEGER DEFAULT 0"),
+                ("deleted_detected_at", "TEXT"),
+                ("deletion_uncertain", "INTEGER DEFAULT 0"),
+                # New API fields not previously captured
+                ("is_spam", "INTEGER DEFAULT 0"),
+                ("depth", "INTEGER"),
+                ("reply_count", "INTEGER"),
+                ("verification_status", "TEXT"),
+                ("updated_at", "TEXT"),
+                ("score", "INTEGER"),
+            ],
+            # Migration 2: Post fields not previously captured
+            "posts": [
+                ("type", "TEXT"),
+                ("is_locked", "INTEGER DEFAULT 0"),
+                ("is_deleted", "INTEGER DEFAULT 0"),
+                ("is_spam", "INTEGER DEFAULT 0"),
+                ("verification_status", "TEXT"),
+                ("updated_at", "TEXT"),
+                ("score", "INTEGER"),
+                ("hot_score", "REAL"),
+                ("deleted_detected_at", "TEXT"),
+            ],
+            # Migration 3: Agent fields not previously captured
+            "agents": [
+                ("display_name", "TEXT"),
+                ("posts_count", "INTEGER"),
+                ("comments_count", "INTEGER"),
+                ("deleted_at", "TEXT"),
+                ("is_active", "INTEGER"),
+                ("is_verified", "INTEGER"),
+                ("last_active", "TEXT"),
+            ],
+            # Migration 4: Post snapshot new columns
+            "post_snapshots": [
+                ("type", "TEXT"),
+                ("is_locked", "INTEGER DEFAULT 0"),
+                ("is_deleted", "INTEGER DEFAULT 0"),
+                ("is_spam", "INTEGER DEFAULT 0"),
+                ("verification_status", "TEXT"),
+                ("updated_at", "TEXT"),
+                ("score", "INTEGER"),
+                ("hot_score", "REAL"),
+            ],
+            # Migration 5: Comment snapshot new columns
+            "comment_snapshots": [
+                ("is_spam", "INTEGER DEFAULT 0"),
+                ("depth", "INTEGER"),
+                ("reply_count", "INTEGER"),
+                ("verification_status", "TEXT"),
+                ("updated_at", "TEXT"),
+                ("score", "INTEGER"),
+                ("is_deleted", "INTEGER DEFAULT 0"),
+                ("deleted_detected_at", "TEXT"),
+                ("deletion_uncertain", "INTEGER DEFAULT 0"),
+            ],
+            # Migration 6: Agent snapshot new columns
+            "agent_snapshots": [
+                ("display_name", "TEXT"),
+                ("posts_count", "INTEGER"),
+                ("comments_count", "INTEGER"),
+                ("is_active", "INTEGER"),
+                ("is_verified", "INTEGER"),
+                ("last_active", "TEXT"),
+                ("deleted_at", "TEXT"),
+            ],
+        }
+        for table, columns in migrations.items():
+            for col, typedef in columns:
+                try:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+        self.conn.commit()
+
+    def get_comment_ids_for_post(self, post_id: str) -> list[str]:
+        """Get all comment IDs we have stored for a given post."""
+        cursor = self.conn.execute(
+            "SELECT id FROM comments WHERE post_id = ? AND is_deleted = 0",
+            (post_id,),
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+    def mark_comments_deleted(self, comment_ids: list[str], uncertain: bool = False):
+        """Mark comments as deleted (no longer returned by API).
+
+        Args:
+            comment_ids: IDs of comments to mark deleted.
+            uncertain: If True, the post has >500 comments so the comment
+                      may just be pushed out of the 500-cap window, not truly deleted.
+        """
+        now = datetime.utcnow().isoformat()
+        for cid in comment_ids:
+            self.conn.execute("""
+                UPDATE comments
+                SET is_deleted = 1, deleted_detected_at = ?, deletion_uncertain = ?
+                WHERE id = ?
+            """, (now, 1 if uncertain else 0, cid))
+
+    def mark_posts_deleted(self, post_ids: list[str]):
+        """Mark posts as deleted (no longer returned by API during full scrape).
+
+        Args:
+            post_ids: IDs of posts to mark deleted.
+        """
+        now = datetime.utcnow().isoformat()
+        for pid in post_ids:
+            self.conn.execute("""
+                UPDATE posts
+                SET is_deleted = 1, deleted_detected_at = ?
+                WHERE id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+            """, (now, pid))
 
     def upsert_agent(self, agent: dict):
         """Insert or update an agent.
 
         Uses COALESCE for enrichment-only fields (karma, is_claimed, follower_count,
-        following_count, owner_json, metadata_json) to avoid overwriting with NULL
-        when partial updates come from posts/comments (which only have id and name).
+        following_count, owner_json, metadata_json, display_name, posts_count,
+        comments_count, is_active, is_verified, last_active) to avoid overwriting
+        with NULL when partial updates come from posts/comments (which only have
+        id and name).
         """
         now = datetime.utcnow().isoformat()
         owner_json = json.dumps(agent.get("owner")) if agent.get("owner") else None
@@ -206,8 +327,10 @@ class Database:
         self.conn.execute("""
             INSERT INTO agents (name, id, description, karma, is_claimed,
                               follower_count, following_count, avatar_url,
-                              owner_json, metadata_json, created_at, last_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              owner_json, metadata_json, created_at, last_updated_at,
+                              display_name, posts_count, comments_count,
+                              is_active, is_verified, last_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 id = COALESCE(excluded.id, agents.id),
                 description = COALESCE(excluded.description, agents.description),
@@ -218,6 +341,12 @@ class Database:
                 avatar_url = COALESCE(excluded.avatar_url, agents.avatar_url),
                 owner_json = COALESCE(excluded.owner_json, agents.owner_json),
                 metadata_json = COALESCE(excluded.metadata_json, agents.metadata_json),
+                display_name = COALESCE(excluded.display_name, agents.display_name),
+                posts_count = COALESCE(excluded.posts_count, agents.posts_count),
+                comments_count = COALESCE(excluded.comments_count, agents.comments_count),
+                is_active = COALESCE(excluded.is_active, agents.is_active),
+                is_verified = COALESCE(excluded.is_verified, agents.is_verified),
+                last_active = COALESCE(excluded.last_active, agents.last_active),
                 last_updated_at = excluded.last_updated_at
         """, (
             agent["name"],
@@ -232,6 +361,12 @@ class Database:
             metadata_json,
             agent.get("created_at"),
             now,
+            agent.get("display_name"),
+            agent.get("posts_count"),
+            agent.get("comments_count"),
+            agent.get("is_active"),
+            agent.get("is_verified"),
+            agent.get("last_active"),
         ))
         # Don't commit here - let caller batch commits
 
@@ -254,8 +389,10 @@ class Database:
         self.conn.execute("""
             INSERT INTO posts (id, title, content, url, author_name, submolt_name,
                              upvotes, downvotes, comment_count, is_pinned,
-                             created_at, last_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             created_at, last_updated_at,
+                             type, is_locked, is_deleted, is_spam,
+                             verification_status, updated_at, score, hot_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 content = excluded.content,
@@ -264,6 +401,13 @@ class Database:
                 downvotes = excluded.downvotes,
                 comment_count = excluded.comment_count,
                 is_pinned = excluded.is_pinned,
+                is_locked = excluded.is_locked,
+                is_deleted = excluded.is_deleted,
+                is_spam = excluded.is_spam,
+                verification_status = excluded.verification_status,
+                updated_at = excluded.updated_at,
+                score = excluded.score,
+                hot_score = excluded.hot_score,
                 last_updated_at = excluded.last_updated_at
         """, (
             post["id"],
@@ -278,6 +422,14 @@ class Database:
             post.get("is_pinned"),
             post.get("created_at"),
             now,
+            post.get("type"),
+            post.get("is_locked"),
+            post.get("is_deleted"),
+            post.get("is_spam"),
+            post.get("verification_status"),
+            post.get("updated_at"),
+            post.get("score"),
+            post.get("hot_score"),
         ))
         # Don't commit here - let caller batch commits
 
@@ -406,12 +558,20 @@ class Database:
 
         self.conn.execute("""
             INSERT INTO comments (id, post_id, parent_id, content, author_name,
-                                upvotes, downvotes, created_at, last_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                upvotes, downvotes, created_at, last_updated_at,
+                                is_spam, depth, reply_count,
+                                verification_status, updated_at, score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 content = excluded.content,
                 upvotes = excluded.upvotes,
                 downvotes = excluded.downvotes,
+                is_spam = COALESCE(excluded.is_spam, comments.is_spam),
+                depth = COALESCE(excluded.depth, comments.depth),
+                reply_count = COALESCE(excluded.reply_count, comments.reply_count),
+                verification_status = COALESCE(excluded.verification_status, comments.verification_status),
+                updated_at = COALESCE(excluded.updated_at, comments.updated_at),
+                score = COALESCE(excluded.score, comments.score),
                 last_updated_at = excluded.last_updated_at
         """, (
             comment["id"],
@@ -423,6 +583,12 @@ class Database:
             comment.get("downvotes"),
             comment.get("created_at"),
             now,
+            comment.get("is_spam"),
+            comment.get("depth"),
+            comment.get("reply_count"),
+            comment.get("verification_status"),
+            comment.get("updated_at"),
+            comment.get("score"),
         ))
         # Don't commit here - let caller batch commits
 
@@ -431,8 +597,10 @@ class Database:
         self.conn.execute("""
             INSERT INTO post_snapshots (
                 post_id, scrape_run_id, title, content, url, author_name, submolt_name,
-                upvotes, downvotes, comment_count, is_pinned, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                upvotes, downvotes, comment_count, is_pinned, created_at,
+                type, is_locked, is_deleted, is_spam,
+                verification_status, updated_at, score, hot_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             post["id"],
             scrape_run_id,
@@ -446,6 +614,14 @@ class Database:
             post.get("comment_count"),
             post.get("is_pinned"),
             post.get("created_at"),
+            post.get("type"),
+            post.get("is_locked"),
+            post.get("is_deleted"),
+            post.get("is_spam"),
+            post.get("verification_status"),
+            post.get("updated_at"),
+            post.get("score"),
+            post.get("hot_score"),
         ))
 
     def save_agent_snapshot(self, agent: dict, scrape_run_id: int = None):
@@ -454,8 +630,10 @@ class Database:
             INSERT INTO agent_snapshots (
                 agent_name, scrape_run_id, agent_id, description, karma, is_claimed,
                 follower_count, following_count, avatar_url,
-                owner_json, metadata_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                owner_json, metadata_json, created_at,
+                display_name, posts_count, comments_count,
+                is_active, is_verified, last_active, deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             agent["name"],
             scrape_run_id,
@@ -469,6 +647,13 @@ class Database:
             agent.get("owner_json"),
             agent.get("metadata_json"),
             agent.get("created_at"),
+            agent.get("display_name"),
+            agent.get("posts_count"),
+            agent.get("comments_count"),
+            agent.get("is_active"),
+            agent.get("is_verified"),
+            agent.get("last_active"),
+            agent.get("deleted_at"),
         ))
 
     def save_comment_snapshot(self, comment: dict, scrape_run_id: int = None):
@@ -476,8 +661,11 @@ class Database:
         self.conn.execute("""
             INSERT INTO comment_snapshots (
                 comment_id, scrape_run_id, post_id, parent_id, content,
-                author_name, upvotes, downvotes, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                author_name, upvotes, downvotes, created_at,
+                is_spam, depth, reply_count,
+                verification_status, updated_at, score,
+                is_deleted, deleted_detected_at, deletion_uncertain
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             comment["id"],
             scrape_run_id,
@@ -488,6 +676,15 @@ class Database:
             comment.get("upvotes"),
             comment.get("downvotes"),
             comment.get("created_at"),
+            comment.get("is_spam"),
+            comment.get("depth"),
+            comment.get("reply_count"),
+            comment.get("verification_status"),
+            comment.get("updated_at"),
+            comment.get("score"),
+            comment.get("is_deleted"),
+            comment.get("deleted_detected_at"),
+            comment.get("deletion_uncertain"),
         ))
 
     def save_submolt_snapshot(self, submolt: dict, scrape_run_id: int = None):

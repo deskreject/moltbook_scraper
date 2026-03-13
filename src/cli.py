@@ -131,6 +131,12 @@ def main():
         help="Path to log file for diagnostics (throttle events, errors)",
     )
     parser.add_argument(
+        "--detect-deletions",
+        action="store_true",
+        help="For posts/comments: compare API response with DB and mark missing entries as deleted. "
+             "For comments: only meaningful without --only-missing. Use during monthly full re-scrapes.",
+    )
+    parser.add_argument(
         "--rate-limit",
         type=float,
         default=None,
@@ -230,7 +236,7 @@ def main():
 
         elif args.command == "posts":
             log("Scraping all posts...")
-            scraper.scrape_posts()
+            scraper.scrape_posts(detect_deletions=args.detect_deletions)
             log("Posts scrape complete.")
 
         elif args.command == "enrich":
@@ -240,7 +246,8 @@ def main():
 
         elif args.command == "comments":
             log("Scraping comments...")
-            scraper.scrape_comments(only_missing=args.only_missing, skip_empty=args.skip_empty)
+            scraper.scrape_comments(only_missing=args.only_missing, skip_empty=args.skip_empty,
+                                    detect_deletions=args.detect_deletions)
             log("Comments scrape complete.")
 
         elif args.command == "moderators":

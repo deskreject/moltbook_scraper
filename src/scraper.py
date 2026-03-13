@@ -119,18 +119,27 @@ class Scraper:
         # Validate against baseline
         self._validate_count("submolts", total_saved[0])
 
-    def scrape_posts(self):
-        """Fetch and store all posts (saves each page immediately)."""
+    def scrape_posts(self, detect_deletions: bool = False):
+        """Fetch and store all posts (saves each page immediately).
+
+        Args:
+            detect_deletions: If True, after full pagination, mark posts in DB
+                            that were not seen as deleted.
+        """
         # Get target count from platform stats
         baseline = self._load_baseline()
         target = baseline.get("posts", 0)
         self._log(f"Fetching all posts (target: {target} unique)...")
+        if detect_deletions:
+            self._log("  Deletion detection enabled — will mark unseen posts as deleted")
 
         total_saved = [0]  # Use list for closure
+        seen_ids = set()
 
         def on_page(page_num, posts):
             for post in posts:
                 self.db.upsert_post(post)
+                seen_ids.add(post["id"])
                 if post.get("author"):
                     self.db.upsert_agent(_normalize_agent(post["author"]))
                 if post.get("submolt") and isinstance(post["submolt"], dict):
@@ -142,53 +151,95 @@ class Scraper:
         self.client.fetch_posts_streaming(on_page=on_page, target_count=target)
         self._log(f"Stored {total_saved[0]} unique posts")
 
+        # Post deletion detection
+        if detect_deletions and seen_ids:
+            all_db_ids = set(self.db.get_all_post_ids())
+            missing_ids = [pid for pid in all_db_ids if pid not in seen_ids]
+            if missing_ids:
+                self.db.mark_posts_deleted(missing_ids)
+                self.db.commit()
+                self._log(f"  Marked {len(missing_ids)} posts as deleted (not seen in full scrape)")
+            else:
+                self._log("  No deleted posts detected")
+
         # Validate against baseline
         self._validate_count("posts", total_saved[0])
 
     def scrape_posts_incremental(self) -> int:
-        """Fetch only new posts, stopping when we hit known posts.
+        """Fetch new posts using cursor-based pagination with sort=new.
+
+        Pages backward from newest. Stops after 3 consecutive pages where
+        all posts are already in the DB. UPSERTs all posts encountered
+        (updating vote counts and comment_count for known posts).
 
         Returns:
             Number of new posts found.
         """
-        self._log("Fetching new posts (incremental)...")
+        self._log("Fetching new posts (incremental, sort=new)...")
+
+        # Load known post IDs into a set for O(1) lookup
+        known_ids = set(self.db.get_all_post_ids())
+        self._log(f"  {len(known_ids):,} posts already in DB")
+
         new_count = 0
-        offset = 0
+        updated_count = 0
+        cursor = None
+        page = 0
+        consecutive_known_pages = 0
+        max_consecutive_known = 3
 
         try:
             while True:
-                posts = self.client.fetch_posts(offset=offset)
+                result = self.client.fetch_posts(limit=100, cursor=cursor, sort="new")
+                posts = result["posts"]
                 if not posts:
                     break
 
-                found_known = False
-                for post in posts:
-                    # Check if we already have this post
-                    if self.db.get_post(post["id"]) is not None:
-                        found_known = True
-                        continue
+                page += 1
+                page_new = 0
 
-                    # New post - store it
+                for post in posts:
                     self.db.upsert_post(post)
                     if post.get("author"):
-                        self.db.upsert_agent(post["author"])
-                    new_count += 1
+                        self.db.upsert_agent(_normalize_agent(post["author"]))
+                    if post.get("submolt") and isinstance(post["submolt"], dict):
+                        self.db.upsert_submolt(post["submolt"])
 
-                if found_known:
-                    # We hit known posts, stop pagination
+                    if post["id"] not in known_ids:
+                        new_count += 1
+                        page_new += 1
+                        known_ids.add(post["id"])
+                    else:
+                        updated_count += 1
+
+                self.db.commit()
+
+                if page_new == 0:
+                    consecutive_known_pages += 1
+                    if consecutive_known_pages >= max_consecutive_known:
+                        self._log(f"  Stopping: {max_consecutive_known} consecutive pages with no new posts")
+                        break
+                else:
+                    consecutive_known_pages = 0
+
+                if page % 10 == 0:
+                    self._log(f"  Page {page}: {new_count:,} new, {updated_count:,} updated")
+
+                if not result["has_more"]:
+                    break
+                cursor = result["next_cursor"]
+                if not cursor:
                     break
 
-                offset += 25
-
-            self.db.commit()
-            self._log(f"Found {new_count} new posts")
+            self._log(f"Incremental scrape: {new_count:,} new posts, {updated_count:,} updated across {page} pages")
             return new_count
+
         except KeyboardInterrupt:
-            self._log(f"Interrupted! Saving {new_count} new posts found so far...")
+            self._log(f"Interrupted! Saving {new_count:,} new posts found so far...")
             self.db.commit()
             raise
         except Exception as e:
-            self._log(f"Error: {e}. Saving {new_count} new posts found so far...")
+            self._log(f"Error: {e}. Saving {new_count:,} new posts found so far...")
             self.db.commit()
             raise
 
@@ -255,6 +306,8 @@ class Scraper:
         success_count = 0
         error_count = 0
 
+        deleted_count = 0
+
         if self.max_workers <= 1:
             # Sequential path
             for i, name in enumerate(agents):
@@ -263,10 +316,14 @@ class Scraper:
                     if profile:
                         self.db.upsert_agent(profile)
                         success_count += 1
+                    else:
+                        # None means 404 / not found — agent likely deleted
+                        self._mark_agent_deleted(name)
+                        deleted_count += 1
                 except Exception:
                     error_count += 1
                 if (i + 1) % 100 == 0:
-                    self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {error_count} errors)")
+                    self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {deleted_count} deleted, {error_count} errors)")
         else:
             # Concurrent path: HTTP in worker threads, DB writes in main thread
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -281,14 +338,28 @@ class Scraper:
                         if profile:
                             self.db.upsert_agent(profile)
                             success_count += 1
+                        else:
+                            self._mark_agent_deleted(name)
+                            deleted_count += 1
                     except Exception:
                         error_count += 1
                     if (i + 1) % 100 == 0:
-                        self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {error_count} errors)")
+                        self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {deleted_count} deleted, {error_count} errors)")
 
-        self._log(f"Enriched {success_count} agents ({error_count} errors)")
+        del_msg = f", {deleted_count} marked deleted" if deleted_count else ""
+        self._log(f"Enriched {success_count} agents ({error_count} errors{del_msg})")
 
-    def scrape_comments(self, only_missing: bool = False, skip_empty: bool = False):
+    def _mark_agent_deleted(self, name: str):
+        """Mark an agent as deleted (404 from profile endpoint)."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        self.db.conn.execute("""
+            UPDATE agents SET deleted_at = ?
+            WHERE name = ? AND deleted_at IS NULL
+        """, (now, name))
+
+    def scrape_comments(self, only_missing: bool = False, skip_empty: bool = False,
+                        detect_deletions: bool = False):
         """Fetch comments for posts.
 
         Args:
@@ -296,7 +367,15 @@ class Scraper:
                          If False, fetch for all posts (updates existing).
             skip_empty: If True, skip posts where comment_count == 0 (platform reports
                         no comments). Reduces API requests by ~74% on the current corpus.
+            detect_deletions: If True, compare API response with DB and mark comments
+                            that are no longer returned as deleted. Only meaningful when
+                            not using only_missing (needs to re-fetch posts that already
+                            have comments). Incompatible with only_missing.
         """
+        if detect_deletions and only_missing:
+            self._log("Warning: --detect-deletions is ignored with --only-missing (no existing comments to compare)")
+            detect_deletions = False
+
         baseline = self._load_baseline()
         target = baseline.get("comments", 0)
 
@@ -313,8 +392,12 @@ class Scraper:
             post_ids = self.db.get_all_post_ids()
             self._log(f"Fetching comments for {len(post_ids)} posts (target: ~{target} comments)...")
 
+        if detect_deletions:
+            self._log("  Deletion detection enabled — will mark comments missing from API")
+
         total_comments = 0
         error_count = 0
+        deleted_count = 0
 
         if self.max_workers <= 1:
             # Sequential path
@@ -324,13 +407,19 @@ class Scraper:
                     if comments:
                         self._store_comments_recursive(comments, post_id)
                         total_comments += self._count_comments_recursive(comments)
-                        self.db.commit()
+
+                    if detect_deletions:
+                        api_ids = self._collect_comment_ids_recursive(comments) if comments else set()
+                        deleted_count += self._detect_deleted_comments(post_id, api_ids)
+
+                    self.db.commit()
                 except Exception as e:
                     error_count += 1
                     if error_count <= 5:
                         self._log(f"  Error fetching comments for post {post_id}: {type(e).__name__}: {e}")
                 if (i + 1) % 50 == 0:
-                    self._log(f"  Progress: {i + 1}/{len(post_ids)} posts ({total_comments} comments, {error_count} errors)")
+                    del_msg = f", {deleted_count} deleted" if detect_deletions else ""
+                    self._log(f"  Progress: {i + 1}/{len(post_ids)} posts ({total_comments} comments, {error_count} errors{del_msg})")
         else:
             # Concurrent path: HTTP in worker threads, DB writes in main thread
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -345,15 +434,22 @@ class Scraper:
                         if comments:
                             self._store_comments_recursive(comments, post_id)
                             total_comments += self._count_comments_recursive(comments)
-                            self.db.commit()
+
+                        if detect_deletions:
+                            api_ids = self._collect_comment_ids_recursive(comments) if comments else set()
+                            deleted_count += self._detect_deleted_comments(post_id, api_ids)
+
+                        self.db.commit()
                     except Exception as e:
                         error_count += 1
                         if error_count <= 5:
                             self._log(f"  Error fetching comments for post {post_id}: {type(e).__name__}: {e}")
                     if (i + 1) % 50 == 0:
-                        self._log(f"  Progress: {i + 1}/{len(post_ids)} posts ({total_comments} comments, {error_count} errors)")
+                        del_msg = f", {deleted_count} deleted" if detect_deletions else ""
+                        self._log(f"  Progress: {i + 1}/{len(post_ids)} posts ({total_comments} comments, {error_count} errors{del_msg})")
 
-        self._log(f"Stored {total_comments} comments ({error_count} errors)")
+        del_msg = f", {deleted_count} marked deleted" if detect_deletions else ""
+        self._log(f"Stored {total_comments} comments ({error_count} errors{del_msg})")
 
         # Validate against baseline (only if not in only_missing mode)
         if not only_missing:
@@ -376,6 +472,39 @@ class Scraper:
                 count += self._count_comments_recursive(comment["replies"])
         return count
 
+    def _collect_comment_ids_recursive(self, comments: list) -> set:
+        """Collect all comment IDs from a nested comment tree."""
+        ids = set()
+        for comment in comments:
+            ids.add(comment["id"])
+            if comment.get("replies"):
+                ids.update(self._collect_comment_ids_recursive(comment["replies"]))
+        return ids
+
+    def _detect_deleted_comments(self, post_id: str, api_comment_ids: set) -> int:
+        """Mark comments in DB that are no longer returned by the API as deleted.
+
+        Handles the 500-comment API cap: if the post's comment_count exceeds 500,
+        missing comments are flagged as deletion_uncertain since they may just be
+        beyond the API's return window rather than truly deleted.
+
+        Returns:
+            Number of comments newly marked as deleted.
+        """
+        existing_ids = self.db.get_comment_ids_for_post(post_id)
+        missing_ids = [cid for cid in existing_ids if cid not in api_comment_ids]
+
+        if not missing_ids:
+            return 0
+
+        # Check if post has more comments than the 500 API cap
+        post = self.db.get_post(post_id)
+        comment_count = post.get("comment_count", 0) if post else 0
+        uncertain = comment_count > 500
+
+        self.db.mark_comments_deleted(missing_ids, uncertain=uncertain)
+        return len(missing_ids)
+
     def create_snapshots(self, scrape_run_id: int = None):
         """Create daily snapshots of post, comment, agent, and submolt metrics.
 
@@ -387,7 +516,9 @@ class Scraper:
         # Post snapshots
         cursor = self.db.conn.execute("""
             SELECT id, title, content, url, author_name, submolt_name,
-                   upvotes, downvotes, comment_count, is_pinned, created_at
+                   upvotes, downvotes, comment_count, is_pinned, created_at,
+                   type, is_locked, is_deleted, is_spam,
+                   verification_status, updated_at, score, hot_score
             FROM posts
         """)
         post_count = 0
@@ -404,6 +535,14 @@ class Scraper:
                 "comment_count": row[8],
                 "is_pinned": row[9],
                 "created_at": row[10],
+                "type": row[11],
+                "is_locked": row[12],
+                "is_deleted": row[13],
+                "is_spam": row[14],
+                "verification_status": row[15],
+                "updated_at": row[16],
+                "score": row[17],
+                "hot_score": row[18],
             }, scrape_run_id)
             post_count += 1
         self._log(f"  Created {post_count} post snapshots")
@@ -411,7 +550,10 @@ class Scraper:
         # Comment snapshots
         cursor = self.db.conn.execute("""
             SELECT id, post_id, parent_id, content, author_name,
-                   upvotes, downvotes, created_at
+                   upvotes, downvotes, created_at,
+                   is_spam, depth, reply_count,
+                   verification_status, updated_at, score,
+                   is_deleted, deleted_detected_at, deletion_uncertain
             FROM comments
         """)
         comment_count = 0
@@ -425,6 +567,15 @@ class Scraper:
                 "upvotes": row[5],
                 "downvotes": row[6],
                 "created_at": row[7],
+                "is_spam": row[8],
+                "depth": row[9],
+                "reply_count": row[10],
+                "verification_status": row[11],
+                "updated_at": row[12],
+                "score": row[13],
+                "is_deleted": row[14],
+                "deleted_detected_at": row[15],
+                "deletion_uncertain": row[16],
             }, scrape_run_id)
             comment_count += 1
         self._log(f"  Created {comment_count} comment snapshots")
@@ -433,7 +584,9 @@ class Scraper:
         cursor = self.db.conn.execute("""
             SELECT name, id, description, karma, is_claimed,
                    follower_count, following_count, avatar_url,
-                   owner_json, metadata_json, created_at
+                   owner_json, metadata_json, created_at,
+                   display_name, posts_count, comments_count,
+                   is_active, is_verified, last_active, deleted_at
             FROM agents
         """)
         agent_count = 0
@@ -450,6 +603,13 @@ class Scraper:
                 "owner_json": row[8],
                 "metadata_json": row[9],
                 "created_at": row[10],
+                "display_name": row[11],
+                "posts_count": row[12],
+                "comments_count": row[13],
+                "is_active": row[14],
+                "is_verified": row[15],
+                "last_active": row[16],
+                "deleted_at": row[17],
             }, scrape_run_id)
             agent_count += 1
         self._log(f"  Created {agent_count} agent snapshots")

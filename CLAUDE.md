@@ -30,9 +30,12 @@ moltbook_scraper/
 ├── latex/
 │   └── moltbook_analysis.tex # Paper source (natbib, booktabs)
 ├── scripts/
-│   ├── daily_scrape.ps1     # Windows PowerShell daily scrape (primary)
-│   ├── daily_scrape.sh      # Bash daily scrape (cross-platform reference)
-│   └── run_on_hpc.sh        # HPC cluster job
+│   ├── weekly_scrape.sh     # Weekly incremental (Hetzner VM cron, Mon 02:00 UTC)
+│   ├── monthly_rescrape.sh  # Monthly full re-scrape (Hetzner VM cron, 1st 02:00 UTC)
+│   ├── status.sh            # VM status dashboard (manual SSH)
+│   ├── daily_scrape.ps1     # Windows PowerShell daily scrape (legacy)
+│   ├── daily_scrape.sh      # Bash daily scrape (legacy reference)
+│   └── run_on_hpc.sh        # HPC cluster job (unused)
 └── tests/                   # pytest unit tests
 ```
 
@@ -61,6 +64,23 @@ python -m src.cli status --db data/raw/moltbook.db
 
 # Fetch platform documentation
 python -m src.cli docs
+
+# Full re-scrape with deletion detection (monthly)
+python -u -m src.cli posts --db data/raw/moltbook.db --detect-deletions --log-file logs/scrape-posts.log
+python -u -m src.cli comments --db data/raw/moltbook.db --detect-deletions --log-file logs/scrape-comments.log
+```
+
+### VM Automation (Hetzner)
+
+```bash
+# Weekly cron (Mon 02:00 UTC): incremental + comments + enrich + snapshots
+0 2 * * 1  cd ~/moltbook_scraper && bash scripts/weekly_scrape.sh
+
+# Monthly cron (1st 02:00 UTC): full re-scrape with deletion detection
+0 2 1 * *  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
+
+# Check status manually
+bash scripts/status.sh
 ```
 
 ### Analysis (R)
@@ -241,3 +261,7 @@ from the requirements.txt or the renv lock file
 | 2026-03-06 | ExtraE113/moltbook_data has only ~165K posts (9%) | Uses offset-based pagination which hits API depth cap; our cursor-based scrape (1.74M posts, 93%) is irreplaceable | Active |
 | 2026-03-11 | All scraping stages complete | Comments: 2,725,187 (167 unreachable posts); agents: 166,998 (7,160 genuinely have no description); snapshots created | Complete |
 | 2026-03-11 | `--only-missing` flag for `enrich` command | Prevents re-fetching 166K agents (~111h) when only stubs need enrichment (~48 min); added `get_unenriched_agent_names()` to DB | Active |
+| 2026-03-13 | Schema migrations for new API fields | Added type, is_locked, is_spam, verification_status, updated_at, score, hot_score (posts); is_spam, depth, reply_count, verification_status, updated_at, score (comments); display_name, posts_count, comments_count, is_active, is_verified, last_active (agents) | Active |
+| 2026-03-13 | Deletion detection for posts and agents | `--detect-deletions` on posts marks unseen posts after full pagination; agent enrichment catches 404 → sets `deleted_at`; comment deletion already existed | Active |
+| 2026-03-13 | Weekly/monthly automation cadence on Hetzner | Weekly (Mon 02:00 UTC): incremental + comments + enrich + snapshots; Monthly (1st 02:00 UTC): full re-scrape with deletion detection; lock file prevents overlap; email alerts via msmtp | Active |
+| 2026-03-13 | Snapshot tables include new columns | Snapshot migrations add same columns as live tables; `create_snapshots()` SELECTs and saves all new fields | Active |
