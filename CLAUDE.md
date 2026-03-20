@@ -79,8 +79,15 @@ python -u -m src.cli comments --db data/raw/moltbook.db --detect-deletions --log
 # Monthly cron (1st 02:00 UTC): full re-scrape with deletion detection
 0 2 1 * *  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
 
-# Check status manually
-bash scripts/status.sh
+# Check status manually (from local machine)
+ssh vm 'cd ~/moltbook_scraper && bash scripts/status.sh'
+
+# Pull DB to local
+scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/
+
+# Push code to VM (then dos2unix!)
+scp -r src/ scripts/ vm:~/moltbook_scraper/
+ssh vm 'cd ~/moltbook_scraper && dos2unix src/*.py scripts/*.sh'
 ```
 
 ### Analysis (R)
@@ -224,21 +231,21 @@ from the requirements.txt or the renv lock file
 | 2026-02-05 | Use snapshot tables for all analysis        | Reproducibility: live tables mutate on each scrape               | Established |
 | 2026-02-05 | 80% tolerance for comment validation        | API caps comments at 1000/post; can never reach platform total   | Established |
 | 2026-02-05 | Non-deterministic pagination with dedup     | Moltbook API returns inconsistent pages; streaming + seen-set    | Established |
-| 2026-02-05 | Rewrite `daily_scrape.sh` for Windows/local | Original hardcoded to `/Users/dholtz/...` (upstream author)      | Planned     |
+| 2026-02-05 | Rewrite `daily_scrape.sh` for Windows/local | Original hardcoded to `/Users/dholtz/...` (upstream author)      | Done (ps1)  |
 | 2026-02-13 | Staged scrape instead of monolithic `full`   | At 100 req/min, full scrape takes days; stages are resumable     | Established |
 | 2026-02-13 | DB path: `data/raw/moltbook.db`              | Smoke test confirmed; DB auto-created by SQLite on first run     | Active      |
 | 2026-02-13 | UTF-8 encoding for all file writes on Windows | cp1252 default breaks on emoji in Moltbook docs                  | Fixed       |
 | 2026-02-13 | Upstream remote added for drift detection     | `git fetch upstream` to check for API changes by original author | Active      |
-| 2026-02-13 | Proactive rate throttle (90/min sliding window) | Avoid 429 storms; maintain diagnostic logs | Active |
+| 2026-02-13 | Proactive rate throttle (90/min sliding window) | Avoid 429 storms; maintain diagnostic logs | REMOVED — caused cold-start burst cascading |
 | 2026-02-13 | PowerShell daily_scrape.ps1 replaces .sh       | Windows 11 environment; .sh kept for reference | Active |
 | 2026-02-13 | Context-economy rules in CLAUDE.md             | Prevent token burn on large logs, error loops, and DB dumps | Active |
 | 2026-02-28 | Removed sliding-window throttle from `client.py` | Cold-start burst caused cascading 429 storms; reactive exponential backoff (upstream approach) is sufficient | Active |
-| 2026-02-28 | Comment cap revised from 1,000 to ~200 per request | Live API confirmed lower cap; 80% validation tolerance unchanged | Active |
+| 2026-02-28 | Comment cap revised from 1,000 to ~200 per request | Live API confirmed lower cap; later corrected to 500 (see 2026-03-05) | Superseded |
 | 2026-02-28 | Posts: cursor-based pagination (`has_more` + `next_cursor`) | API breaking change confirmed live; offset parameter no longer honoured | Active |
 | 2026-02-28 | Submolts: page-based pagination (`?page=N`, 20/page) | API breaking change; offset returned only first page then empty | Active |
 | 2026-02-28 | Comments: separate endpoint (`/posts/{id}/comments`) | API breaking change; comments no longer embedded in post response | Active |
 | 2026-02-28 | `_normalize_agent()` applied to all embedded author objects | API returns camelCase for embedded agents; DB schema expects snake_case | Active |
-| 2026-02-28 | HPC (`scripts/run_on_hpc.sh`) flagged for comments+enrich | 10-14 day comments and multi-week enrich are impractical on local machine; script needs cluster-specific info from user | Pending |
+| 2026-02-28 | HPC (`scripts/run_on_hpc.sh`) flagged for comments+enrich | 10-14 day comments and multi-week enrich are impractical on local machine; script needs cluster-specific info from user | Superseded by Hetzner VM |
 | 2026-03-02 | Posts scrape must use `sort=new` not default `sort=hot` | `sort=hot` is algorithmically capped at ~70K posts (exhausts score-based tail after ~700 pages, covering only ~3 days); `sort=new` traverses full chronological archive back to platform launch | Active |
 | 2026-03-02 | Platform launched ~Jan 15 2026 | Confirmed via cursor injection: no posts exist before Jan 15; platform is ~6 weeks old at time of scraping | Active |
 | 2026-03-02 | Cloud VM (Hetzner/DigitalOcean) as HPC alternative | Comments (~10-14 days) and enrich (weeks) need persistent uptime; cheap VM (~€5-10 total) is lower-friction than HPC for a researcher without cluster experience | Active |
@@ -251,7 +258,7 @@ from the requirements.txt or the renv lock file
 | 2026-03-05 | Comments fetch uses `limit=500` (server hard cap) | Default was 100; cap confirmed 500 via `src/routes/posts.js`; one request still per post | Active |
 | 2026-03-05 | Use `python -u` for all background scrapes | Block-buffered stdout causes silent error loss when process dies; `-u` makes output appear immediately in task file | Active |
 | 2026-03-05 | Comments scrape runs sequential (1 worker, no token bucket) | Multi-worker approach is slower than sequential for this API (see readme_api_limit.md); sequential achieves ~25-150 req/min depending on post weight, zero 429s | Active |
-| 2026-03-05 | Do not auto-start enrich after comments | User evaluating second API token and cloud VM options first | Pending |
+| 2026-03-05 | Do not auto-start enrich after comments | User evaluating second API token and cloud VM options first | Resolved — weekly script runs all stages sequentially |
 | 2026-03-06 | Token bucket capacity must be 1.0 (no burst) | capacity=9 caused up to 9 simultaneous requests; combined with retries-bypassing-bucket bug, produced 540 HTTP req/min against 60/min limit; 10h of abuse triggered infrastructure block | Active |
 | 2026-03-06 | Confirmed production rate limit is 60/min not 100/min | Live header `X-RateLimit-Limit: 60`; token bucket default corrected to 55/min; second API key = independent 60/min window | Active |
 | 2026-03-06 | Sequential is faster than concurrent for this API | 1 worker ~25-150/min (zero 429s); 16 workers ~10/min (constant 429s); correct parallelism is across machines/IPs | Active |
@@ -265,3 +272,9 @@ from the requirements.txt or the renv lock file
 | 2026-03-13 | Deletion detection for posts and agents | `--detect-deletions` on posts marks unseen posts after full pagination; agent enrichment catches 404 → sets `deleted_at`; comment deletion already existed | Active |
 | 2026-03-13 | Weekly/monthly automation cadence on Hetzner | Weekly (Mon 02:00 UTC): incremental + comments + enrich + snapshots; Monthly (1st 02:00 UTC): full re-scrape with deletion detection; lock file prevents overlap; email alerts via msmtp | Active |
 | 2026-03-13 | Snapshot tables include new columns | Snapshot migrations add same columns as live tables; `create_snapshots()` SELECTs and saves all new fields | Active |
+| 2026-03-16 | Weekly scrape takes ~8-10h, not ~1-2h | Moderators stage fetches all 19.6K submolts at ~47/min = ~7h; this is the bottleneck. Comments for weekly gap (~20K posts) takes ~1-2h. Total ~8-10h. | Active |
+| 2026-03-16 | Comments throughput varies by post weight | Lightweight posts (few comments): ~130 posts/min; heavy posts (500+ comments): ~25/min. Session 12 catch-up averaged 130/min because new posts are light | Active |
+| 2026-03-16 | Windows → Linux: always dos2unix after scp | Shell scripts and Python files from Windows have `\r\n` line endings that break bash `set -euo pipefail` and shebang lines. Run `dos2unix src/*.py scripts/*.sh` on VM after every code push | Active |
+| 2026-03-16 | SSH config alias `vm` for Hetzner | `~/.ssh/config` maps `vm` → `root@159.69.34.240` with `hetzner_key`. Use `ssh vm`, `scp vm:...` instead of full commands | Active |
+| 2026-03-16 | All scraping jobs run on VM, not locally | VM has lower latency to API, doesn't tie up local machine. Only run locally if job is short (<1h) and user explicitly approves | Active |
+| 2026-03-16 | status.sh: use `find` not `ls glob` under `set -e` | `ls *.db` fails with exit 2 when no files match; `find -name '*.db'` returns empty without error. Glob expansion under `set -e` is a bash footgun | Active |

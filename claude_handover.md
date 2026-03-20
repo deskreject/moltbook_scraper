@@ -1,112 +1,214 @@
 # Claude Handover - Moltbook Scraper
 
-**Last updated**: 2026-03-13 (session 11)
-**Git state**: Branch `main`, uncommitted changes pending commit
+**Last updated**: 2026-03-16 (session 12)
+**Git state**: Branch `main`, committed at `3818df0` (uncommitted: doc updates + status.sh bugfix)
 **Local machine**: Windows 11, Python 3.14.0, venv at `.venv/`
 
 ---
 
-## Current DB State (2026-03-11, pre-catch-up)
+## Current DB State (2026-03-15)
 
 | Table | Count | Status |
 |-------|-------|--------|
-| posts | 1,742,447 | Complete (93.4% of platform's 2.01M) |
-| submolts | 18,673 | Complete (97.0% of platform's 19,241) |
-| moderators | 13,741 | Complete |
-| comments | 2,725,187 | Complete (167 posts unreachable — stale comment_count, API returns empty) |
-| agents | 166,998 | Complete. 7,160 have no description (genuinely unset on platform) |
-| snapshots | 1,742,447 post / 2,725,187 comment / 166,998 agent / 18,673 submolt / 13,741 mod | Created 2026-03-11 |
+| posts | 2,068,988 | Complete (~100% of platform's 2.07M) |
+| submolts | 19,593 | Complete (~100% of platform's 19,594) |
+| moderators | 18,769 | Complete |
+| comments | 3,177,832 | Complete. 167 posts unreachable (stale API counts) |
+| agents | 171,003 | Complete. Stubs genuinely have no bio |
+| snapshots | 2,068,988 post / 3,177,832 comment / 171,003 agent / 19,593 submolt / 18,769 mod | Fresh (2026-03-15) |
 
-**DB size**: 5.7 GB (3.0 GB live + 2.7 GB snapshots)
-**DB path**: `data/raw/moltbook.db`
-
----
-
-## Session 11 Changes (2026-03-13)
-
-### Schema & upserts
-- **Migrations**: New columns for posts (type, is_locked, is_spam, verification_status, updated_at, score, hot_score, deleted_detected_at), comments (is_spam, depth, reply_count, verification_status, updated_at, score), agents (display_name, posts_count, comments_count, is_active, is_verified, last_active, deleted_at)
-- **Snapshot table migrations**: Same columns added to post_snapshots, comment_snapshots, agent_snapshots
-- **`upsert_agent()`**: Now persists all new agent fields with COALESCE
-- **`upsert_comment()`**: Now persists all new comment fields with COALESCE
-- **`upsert_post()`**: Already updated in session 10
-
-### Deletion detection
-- **`mark_posts_deleted(post_ids)`**: New DB method, analogous to `mark_comments_deleted()`
-- **Post deletion**: `scrape_posts(detect_deletions=True)` tracks seen IDs during full pagination, marks unseen as deleted
-- **Agent deletion**: `enrich_agents()` catches 404 → sets `deleted_at`
-- **`--detect-deletions` flag**: Now works for both `posts` and `comments` commands
-
-### Automation scripts (Hetzner VM)
-- **`scripts/weekly_scrape.sh`**: Lock file, DB backup, staged scrape, email alerts, backup pruning (keep 2)
-- **`scripts/monthly_rescrape.sh`**: Full re-scrape with deletion detection, pre/post backups, email on start/fail/complete
-- **`scripts/status.sh`**: Dashboard showing DB size, row counts, disk, backups, cron jobs, recent errors
+**DB size**: 9.9 GB (with snapshots) — identical copy on VM and local
+**Platform stats** (2026-03-13): 2,863,666 agents, 19,594 submolts, 2,070,859 posts, 13,336,777 comments
 
 ---
 
-## Scraping Cadence
+## VM Automation (active as of 2026-03-16)
 
-| Schedule | Script | Stages | Duration |
-|----------|--------|--------|----------|
-| Weekly Mon 02:00 UTC | `weekly_scrape.sh` | incremental → submolts → comments(--only-missing --skip-empty) → moderators → enrich(--only-missing) → snapshots | ~1-2 hours |
-| Monthly 1st 02:00 UTC | `monthly_rescrape.sh` | posts(full, --detect-deletions) → comments(full, --detect-deletions) → enrich(--only-missing) → snapshots | ~5-7 days |
+**SSH**: `ssh vm` (alias configured in `~/.ssh/config` → `root@159.69.34.240`)
 
-Cron entries:
-```
-0 2 * * 1  cd ~/moltbook_scraper && bash scripts/weekly_scrape.sh
-0 2 1 * *  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
-```
+| Schedule | Script | Duration |
+|----------|--------|----------|
+| Weekly Mon 02:00 UTC | `weekly_scrape.sh` | ~8-10h (moderators ~7h is bottleneck) |
+| Monthly 1st 02:00 UTC | `monthly_rescrape.sh` | ~5-7 days |
 
----
-
-## VM Operations
-
-**VM**: Hetzner CX23, Nuremberg (re-provision as needed)
-**Email alerts**: Set `MOLTBOOK_ALERT_EMAIL` in `.env`, install `msmtp`
 **Check status**: `ssh vm 'cd ~/moltbook_scraper && bash scripts/status.sh'`
 **Pull DB locally**: `scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/`
-**Push code to VM**: `scp -r src/ scripts/ vm:~/moltbook_scraper/`
+**Push code to VM**: `scp -r src/ scripts/ vm:~/moltbook_scraper/` then `ssh vm 'cd ~/moltbook_scraper && dos2unix src/*.py scripts/*.sh'`
+
+**Issue detection**:
+- Stage failure → email alert (if msmtp configured) + logged to `logs/weekly-*.log`
+- Disk >80% → email alert
+- Lock collision → weekly exits; monthly waits 2h then alerts
+- **Silent failure gap**: VM crash / cron not firing produces no alert — check status manually
 
 ---
 
 ## Returning After Absence
 
-1. Check VM status: `ssh vm 'bash ~/moltbook_scraper/scripts/status.sh'`
-2. Review logs: `ssh vm 'tail -50 ~/moltbook_scraper/logs/weekly-*.log'`
-3. If VM deleted: re-provision, clone repo, copy DB, set up cron
-4. If >1 month gap: run catch-up manually (incremental → comments → enrich → snapshots)
+1. `ssh vm 'cd ~/moltbook_scraper && bash scripts/status.sh'`
+2. `ssh vm 'tail -50 ~/moltbook_scraper/logs/weekly-*.log'`
+3. If VM deleted: re-provision, push code + DB, set up cron (see archive session 12)
+4. If >1 month gap: run catch-up on VM (incremental → comments → enrich → snapshots)
 5. Pull latest DB: `scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/`
 
 ---
 
-## Next Steps
+## Next Immediate Steps
 
-### 1. Catch-up scrape on Hetzner VM
-Run staged catch-up for the 2-day gap:
+### 1. Configure email alerts on VM (manual — credentials should not pass through chat)
 ```bash
-python -u -m src.cli incremental --db data/raw/moltbook.db
-python -u -m src.cli submolts --db data/raw/moltbook.db
-python -u -m src.cli comments --only-missing --skip-empty --db data/raw/moltbook.db
-python -u -m src.cli moderators --db data/raw/moltbook.db
-python -u -m src.cli enrich --only-missing --db data/raw/moltbook.db
-python -m src.cli snapshots --db data/raw/moltbook.db
+ssh vm
+nano /root/.msmtprc          # Fill in Gmail address + app password (see email_setup_guide below)
+nano ~/moltbook_scraper/.env  # Set MOLTBOOK_ALERT_EMAIL=your.work@outlook.com
+echo "Test alert" | msmtp your.work@outlook.com   # Verify
 ```
 
-### 2. Set up cron on VM
-Install cron entries and configure msmtp for email alerts.
+### 2. Commit pending doc + script changes
+status.sh bugfix, handover/archive updates, CLAUDE.md methodology entries
 
-### 3. Run R analysis pipeline
+### 3. Verify first weekly cron run
+Monday 2026-03-16 02:00 UTC → check `ssh vm 'tail -20 ~/moltbook_scraper/logs/weekly-*.log'` by ~12:00 UTC. Confirm email arrives.
 
-### 4. Fix pre-existing test failure
-`test_fetch_all_posts_paginates_until_no_more` — needs update for cursor-based pagination.
+### 4. Run R analysis pipeline
+`analysis/R/01_load_data.R` through `07_owner_analysis.R` — requires fresh snapshots (done)
+
+### 5. Fix pre-existing test failure
+`test_fetch_all_posts_paginates_until_no_more` — needs update for cursor-based pagination
 
 ---
 
 ## Key Reference
 
-- **DB path**: `data/raw/moltbook.db` (5.7 GB with snapshots)
+- **DB path**: `data/raw/moltbook.db` (9.9 GB with snapshots)
 - **DB write behaviour**: UPSERT throughout — re-running any stage is safe
 - **Schema**: `src/database.py:_create_tables()` + `_migrate()`
 - **Rate limit docs**: `readme_api_limit.md`
 - **Comment hard cap**: 500/post, no pagination (API limitation)
-- **Platform scale** (2026-03-11): ~2.86M agents, ~2.01M posts, ~13.21M comments, ~19.2K submolts
+- **Sequential > concurrent**: 1 worker at ~25-150 req/min beats 16 workers at ~10 req/min (see `readme_api_limit.md`)
+- **Windows → VM gotcha**: Always `dos2unix` after `scp` from Windows
+
+---
+
+## Email Alert Setup Guide (step-by-step)
+
+The VM scripts send email alerts on scrape completion, failure, and disk warnings.
+This uses **msmtp** (a lightweight SMTP client already installed on the VM) to send
+mail through your Gmail account to any recipient (e.g., your Outlook work email).
+
+### Step 1: Create a Gmail App Password
+
+You need this because Gmail blocks regular password login from scripts.
+
+1. Go to https://myaccount.google.com/security
+2. Make sure **2-Step Verification** is turned ON (required for app passwords)
+3. Go to https://myaccount.google.com/apppasswords
+   - If you don't see "App passwords", search for it in the Google Account search bar
+4. Under "Select app", type a name like `moltbook-alerts`
+5. Click **Create**
+6. Google shows a 16-character password like `abcd efgh ijkl mnop` — **copy it now**, you can't see it again
+   - Remove the spaces when you use it: `abcdefghijklmnop`
+
+### Step 2: Configure msmtp on the VM
+
+From your **Windows terminal** (Git Bash, PowerShell, or Windows Terminal):
+
+```bash
+# Connect to the VM
+ssh vm
+
+# Edit the msmtp config file (already created with a template)
+nano /root/.msmtprc
+```
+
+Replace the placeholder values so the file looks like this:
+
+```
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile        /root/.msmtp.log
+
+account gmail
+host           smtp.gmail.com
+port           587
+from           YOUR_ACTUAL_GMAIL@gmail.com
+user           YOUR_ACTUAL_GMAIL@gmail.com
+password       abcdefghijklmnop
+
+account default : gmail
+```
+
+- Replace `YOUR_ACTUAL_GMAIL@gmail.com` with your real Gmail address (both lines)
+- Replace `abcdefghijklmnop` with the app password from Step 1 (no spaces)
+
+Save and exit nano: `Ctrl+O` → `Enter` → `Ctrl+X`
+
+Verify permissions (should already be 600):
+```bash
+ls -la /root/.msmtprc
+# Should show: -rw------- 1 root root ...
+```
+
+### Step 3: Set the recipient email address
+
+```bash
+# Still on the VM — edit the scraper's .env file
+nano ~/moltbook_scraper/.env
+```
+
+Change the last line from:
+```
+MOLTBOOK_ALERT_EMAIL=YOUR_WORK_EMAIL@outlook.com
+```
+to your actual work email:
+```
+MOLTBOOK_ALERT_EMAIL=your.actual.email@youruniversity.edu
+```
+
+Save and exit.
+
+### Step 4: Test it
+
+```bash
+# Still on the VM
+echo "Test alert from Moltbook scraper on $(hostname)" | msmtp your.actual.email@youruniversity.edu
+```
+
+Check your inbox (and spam folder). You should receive the test email within a minute.
+
+If it fails, check the log:
+```bash
+cat /root/.msmtp.log
+```
+
+Common errors:
+- `authentication failed` → wrong app password, or 2FA not enabled
+- `connection refused` → firewall blocking port 587 (unlikely on Hetzner)
+- `certificate verification failed` → run `apt-get install ca-certificates`
+
+### Step 5: Verify with a real scrape alert
+
+The next weekly scrape (Monday 02:00 UTC) will send an email summary automatically.
+To test sooner, you can trigger a quick manual scrape:
+
+```bash
+# On the VM — this runs a tiny incremental (only new posts since last scrape)
+cd ~/moltbook_scraper
+source .env
+python -u -m src.cli incremental --db data/raw/moltbook.db
+```
+
+Or test the email function directly from the weekly script:
+```bash
+cd ~/moltbook_scraper
+source .env
+echo "Manual test from weekly script" | msmtp "$MOLTBOOK_ALERT_EMAIL"
+```
+
+### Notes
+
+- The **sender** is your Gmail. The **recipient** can be any email (Outlook, university, etc.)
+- Gmail app passwords don't expire, but you can revoke them at https://myaccount.google.com/apppasswords
+- If you ever re-provision the VM, you'll need to redo Steps 2-3 (install msmtp, create config, set .env)
+- The `/root/.msmtprc` file is NOT in the git repo (it contains your password). It lives only on the VM

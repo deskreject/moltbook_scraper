@@ -36,7 +36,8 @@
 - **Approach**: 1 worker, reactive exponential backoff on 429
 - **Result**: ~25 req/min (limited by 2.4s network latency). Well under 60/min limit. No 429s.
 - **Production validation (session 9)**: Full 4.7-day VM comments scrape completed 433,850 posts with only 8 errors and 63 rate-limits. Mop-up of 2,725 posts completed with 0 errors, 0 rate-limits. Agent enrichment of 7,160 profiles completed with 0 rate-limits at ~47/min. Sequential is the proven production approach.
-- **Status**: WORKED. This is the reliable baseline. Confirmed at scale.
+- **Session 12 catch-up (local, 2026-03-13→15)**: Confirmed again at scale. Posts incremental: ~50 req/min (3,269 pages, 39 min, 0 errors). Comments (130K posts): ~130 posts/min over 16h, 0 errors, 0 rate-limits. Moderators (19.6K submolts): ~47/min, 7h, 0 errors. Enrich (7.2K agents): ~47/min, 2.5h, 0 errors. Comments throughput was notably higher (~130/min) than the VM session 9 run because the new posts have fewer comments on average (lightweight requests).
+- **Status**: WORKED. This is the reliable baseline. Confirmed at scale across 3 separate multi-day runs.
 
 ### 2. Proactive sliding-window throttle (session 3)
 - **Approach**: Added to `client.py` as middleware
@@ -91,7 +92,7 @@ The multi-worker approach with a token bucket aims for 55 req/min but in practic
 ## Recommended Approach
 
 ### Single machine
-Run sequential (1 worker, no token bucket). Default `--workers 1` already does this. Rate: ~25/min. Time for 434K posts: ~12 days.
+Run sequential (1 worker, no token bucket). Default `--workers 1` already does this. Rate: ~25-130/min depending on comment density. Lightweight posts (few comments): ~130/min; heavy posts (500+ comments): ~25/min. Full corpus (~580K posts with comments): ~5-7 days on VM.
 
 ```powershell
 .venv\Scripts\python -u -m src.cli comments --only-missing --skip-empty --db data/raw/moltbook.db --log-file logs/scrape-comments.log

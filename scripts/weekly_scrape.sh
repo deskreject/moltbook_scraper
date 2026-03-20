@@ -5,6 +5,7 @@
 # Stages: incremental → submolts → comments(--only-missing --skip-empty)
 #         → moderators → enrich(--only-missing) → snapshots
 #
+# Duration: ~8-10 hours (moderators ~7h is the bottleneck — 19.6K submolts at ~47/min)
 # Features: lock file, DB backup, per-stage timing, email summary, backup pruning
 
 set -euo pipefail

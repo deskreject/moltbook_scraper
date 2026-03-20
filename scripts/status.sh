@@ -50,11 +50,11 @@ echo "Disk:           $DISK_FREE free / $DISK_TOTAL total (${DISK_PCT}% used)"
 
 # ─── Backups ─────────────────────────────────────────────────────────────────
 if [[ -d "$BACKUP_DIR" ]]; then
-    BACKUP_COUNT=$(ls -1 "$BACKUP_DIR"/*.db 2>/dev/null | wc -l)
+    BACKUP_COUNT=$(find "$BACKUP_DIR" -maxdepth 1 -name '*.db' 2>/dev/null | wc -l)
     BACKUP_SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
     echo "Backups:        $BACKUP_COUNT files ($BACKUP_SIZE total)"
     if [[ "$BACKUP_COUNT" -gt 0 ]]; then
-        LATEST_BACKUP=$(ls -1t "$BACKUP_DIR"/*.db 2>/dev/null | head -1)
+        LATEST_BACKUP=$(find "$BACKUP_DIR" -maxdepth 1 -name '*.db' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
         echo "  Latest:       $(basename "$LATEST_BACKUP") ($(du -h "$LATEST_BACKUP" | cut -f1))"
     fi
 else
@@ -96,7 +96,9 @@ for logfile in "$LOG_DIR"/*.log; do
     [[ -f "$logfile" ]] || continue
     # Only check logs modified in last 7 days
     if find "$logfile" -mtime -7 -print -quit 2>/dev/null | grep -q .; then
-        count=$(grep -c -i "ERROR\|FAILED\|FAILURE" "$logfile" 2>/dev/null || echo "0")
+        count=$(grep -c -i "ERROR\|FAILED\|FAILURE" "$logfile" 2>/dev/null || true)
+        count=$(echo "$count" | tr -d '[:space:]')
+        count=${count:-0}
         if [[ "$count" -gt 0 ]]; then
             echo "  $(basename "$logfile"): $count error(s)"
             ERROR_COUNT=$((ERROR_COUNT + count))
