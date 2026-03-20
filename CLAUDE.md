@@ -278,3 +278,5 @@ from the requirements.txt or the renv lock file
 | 2026-03-16 | SSH config alias `vm` for Hetzner | `~/.ssh/config` maps `vm` → `root@159.69.34.240` with `hetzner_key`. Use `ssh vm`, `scp vm:...` instead of full commands | Active |
 | 2026-03-16 | All scraping jobs run on VM, not locally | VM has lower latency to API, doesn't tie up local machine. Only run locally if job is short (<1h) and user explicitly approves | Active |
 | 2026-03-16 | status.sh: use `find` not `ls glob` under `set -e` | `ls *.db` fails with exit 2 when no files match; `find -name '*.db'` returns empty without error. Glob expansion under `set -e` is a bash footgun | Active |
+| 2026-03-20 | VM scripts must use `.venv/bin/python`, not bare `python` | Ubuntu 24.04 has no `python` binary (only `python3`). Cron ran silently failing for a week. Scripts now use `$PYTHON="$SCRAPER_DIR/.venv/bin/python"` | Active |
+| 2026-03-20 | Upstream audit: only 1 new commit, most changes already done independently | Gaps: `claimed_by` (agents), 4 submolt fields, `enrich_submolts()`, COALESCE on submolt upsert. None critical. | Active |

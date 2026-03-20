@@ -12,6 +12,7 @@ set -euo pipefail
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 SCRAPER_DIR="$HOME/moltbook_scraper"
+PYTHON="$SCRAPER_DIR/.venv/bin/python"
 DB_PATH="$SCRAPER_DIR/data/raw/moltbook.db"
 BACKUP_DIR="$SCRAPER_DIR/data/backups"
 LOG_DIR="$SCRAPER_DIR/logs"
@@ -115,12 +116,12 @@ run_stage() {
     fi
 }
 
-run_stage "incremental"  python -u -m src.cli incremental --db "$DB_PATH" --log-file "$LOG_DIR/scrape-incremental.log"
-run_stage "submolts"     python -u -m src.cli submolts    --db "$DB_PATH" --log-file "$LOG_DIR/scrape-submolts.log"
-run_stage "comments"     python -u -m src.cli comments    --db "$DB_PATH" --only-missing --skip-empty --log-file "$LOG_DIR/scrape-comments.log"
-run_stage "moderators"   python -u -m src.cli moderators  --db "$DB_PATH" --log-file "$LOG_DIR/scrape-moderators.log"
-run_stage "enrich"       python -u -m src.cli enrich      --db "$DB_PATH" --only-missing --log-file "$LOG_DIR/scrape-enrich.log"
-run_stage "snapshots"    python -m src.cli snapshots       --db "$DB_PATH"
+run_stage "incremental"  "$PYTHON" -u -m src.cli incremental --db "$DB_PATH" --log-file "$LOG_DIR/scrape-incremental.log"
+run_stage "submolts"     "$PYTHON" -u -m src.cli submolts    --db "$DB_PATH" --log-file "$LOG_DIR/scrape-submolts.log"
+run_stage "comments"     "$PYTHON" -u -m src.cli comments    --db "$DB_PATH" --only-missing --skip-empty --log-file "$LOG_DIR/scrape-comments.log"
+run_stage "moderators"   "$PYTHON" -u -m src.cli moderators  --db "$DB_PATH" --log-file "$LOG_DIR/scrape-moderators.log"
+run_stage "enrich"       "$PYTHON" -u -m src.cli enrich      --db "$DB_PATH" --only-missing --log-file "$LOG_DIR/scrape-enrich.log"
+run_stage "snapshots"    "$PYTHON" -m src.cli snapshots       --db "$DB_PATH"
 
 # ─── DB Stats ────────────────────────────────────────────────────────────────
 DB_SIZE=$(du -h "$DB_PATH" | cut -f1)

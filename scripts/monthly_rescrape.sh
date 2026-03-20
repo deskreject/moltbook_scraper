@@ -12,6 +12,7 @@ set -euo pipefail
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 SCRAPER_DIR="$HOME/moltbook_scraper"
+PYTHON="$SCRAPER_DIR/.venv/bin/python"
 DB_PATH="$SCRAPER_DIR/data/raw/moltbook.db"
 BACKUP_DIR="$SCRAPER_DIR/data/backups"
 LOG_DIR="$SCRAPER_DIR/logs"
@@ -129,10 +130,10 @@ run_stage() {
     check_disk
 }
 
-run_stage "posts-full"   python -u -m src.cli posts    --db "$DB_PATH" --detect-deletions --log-file "$LOG_DIR/scrape-posts.log"
-run_stage "comments-full" python -u -m src.cli comments --db "$DB_PATH" --detect-deletions --log-file "$LOG_DIR/scrape-comments.log"
-run_stage "enrich"       python -u -m src.cli enrich   --db "$DB_PATH" --only-missing --log-file "$LOG_DIR/scrape-enrich.log"
-run_stage "snapshots"    python -m src.cli snapshots    --db "$DB_PATH"
+run_stage "posts-full"   "$PYTHON" -u -m src.cli posts    --db "$DB_PATH" --detect-deletions --log-file "$LOG_DIR/scrape-posts.log"
+run_stage "comments-full" "$PYTHON" -u -m src.cli comments --db "$DB_PATH" --detect-deletions --log-file "$LOG_DIR/scrape-comments.log"
+run_stage "enrich"       "$PYTHON" -u -m src.cli enrich   --db "$DB_PATH" --only-missing --log-file "$LOG_DIR/scrape-enrich.log"
+run_stage "snapshots"    "$PYTHON" -m src.cli snapshots    --db "$DB_PATH"
 
 # ─── Post-scrape DB Backup ───────────────────────────────────────────────────
 BACKUP_POST="$BACKUP_DIR/moltbook-monthly-post-${DATE}.db"

@@ -1,24 +1,24 @@
 # Claude Handover - Moltbook Scraper
 
-**Last updated**: 2026-03-16 (session 12)
-**Git state**: Branch `main`, committed at `3818df0` (uncommitted: doc updates + status.sh bugfix)
+**Last updated**: 2026-03-20 (session 13)
+**Git state**: Branch `main`, committed at `bac2cb6` (uncommitted: venv python fix for weekly/monthly scripts)
 **Local machine**: Windows 11, Python 3.14.0, venv at `.venv/`
 
 ---
 
-## Current DB State (2026-03-15)
+## Current DB State (2026-03-20)
 
-| Table | Count | Status |
-|-------|-------|--------|
-| posts | 2,068,988 | Complete (~100% of platform's 2.07M) |
-| submolts | 19,593 | Complete (~100% of platform's 19,594) |
-| moderators | 18,769 | Complete |
-| comments | 3,177,832 | Complete. 167 posts unreachable (stale API counts) |
-| agents | 171,003 | Complete. Stubs genuinely have no bio |
-| snapshots | 2,068,988 post / 3,177,832 comment / 171,003 agent / 19,593 submolt / 18,769 mod | Fresh (2026-03-15) |
+| Table | Count | Location | Status |
+|-------|-------|----------|--------|
+| posts | ~2,087,028 | VM (fresher) | VM incremental ran Mar 20, local is Mar 13 |
+| submolts | 19,593 | Both | Complete |
+| moderators | 18,769 | Both | Complete |
+| comments | 3,177,832 | Both | Complete. 167 posts unreachable (stale API counts) |
+| agents | 171,003 | Both | Complete. Stubs genuinely have no bio |
+| snapshots | 2,068,988 post / 3,177,832 comment / 171,003 agent / 19,593 submolt / 18,769 mod | Both | From 2026-03-15, needs refresh after next weekly |
 
-**DB size**: 9.9 GB (with snapshots) — identical copy on VM and local
-**Platform stats** (2026-03-13): 2,863,666 agents, 19,594 submolts, 2,070,859 posts, 13,336,777 comments
+**DB size**: 9.9 GB (with snapshots)
+**VM DB is ahead** of local by ~18K posts from Mar 20 incremental. Pull with `scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/` when needed.
 
 ---
 
@@ -55,19 +55,13 @@
 
 ## Next Immediate Steps
 
-### 1. Configure email alerts on VM (manual — credentials should not pass through chat)
-```bash
-ssh vm
-nano /root/.msmtprc          # Fill in Gmail address + app password (see email_setup_guide below)
-nano ~/moltbook_scraper/.env  # Set MOLTBOOK_ALERT_EMAIL=your.work@outlook.com
-echo "Test alert" | msmtp your.work@outlook.com   # Verify
-```
+### 1. ~~Configure email alerts~~ DONE (user confirmed working 2026-03-20)
 
-### 2. Commit pending doc + script changes
-status.sh bugfix, handover/archive updates, CLAUDE.md methodology entries
+### 2. Commit venv python fix + verify next weekly cron
+Scripts now use `$PYTHON` (`.venv/bin/python`) instead of bare `python` (which doesn't exist on Ubuntu 24.04). Fix already pushed to VM and tested. Weekly cron failed silently Mar 17 due to this bug — first real weekly will be **Mon Mar 23 02:00 UTC**.
 
-### 3. Verify first weekly cron run
-Monday 2026-03-16 02:00 UTC → check `ssh vm 'tail -20 ~/moltbook_scraper/logs/weekly-*.log'` by ~12:00 UTC. Confirm email arrives.
+### 3. Apply upstream schema gaps (low effort, improves data quality)
+From upstream `787f2d9`: add `claimed_by` (agents), `creator_id`/`post_count`/`is_nsfw`/`is_private` (submolts), COALESCE fix on submolt upsert, `enrich_submolts()` method.
 
 ### 4. Run R analysis pipeline
 `analysis/R/01_load_data.R` through `07_owner_analysis.R` — requires fresh snapshots (done)
