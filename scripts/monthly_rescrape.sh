@@ -19,7 +19,6 @@ LOG_DIR="$SCRAPER_DIR/logs"
 LOCK_FILE="/tmp/moltbook_scrape.lock"
 DATE=$(date -u +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/monthly-${DATE}.log"
-EMAIL_TO="${MOLTBOOK_ALERT_EMAIL:-}"
 KEEP_MONTHLY_BACKUPS=1
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -98,6 +97,7 @@ mkdir -p "$LOG_DIR" "$BACKUP_DIR"
 cd "$SCRAPER_DIR"
 
 [[ -f .env ]] && set -a && source .env && set +a
+EMAIL_TO="${MOLTBOOK_ALERT_EMAIL:-}"
 
 SCRIPT_START=$(date +%s)
 log "=========================================="

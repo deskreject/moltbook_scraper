@@ -4,6 +4,32 @@ Synthesized records of completed work from previous sessions. See `claude_handov
 
 ---
 
+## 2026-03-26 (session 15) — VM health check, email fix, swap fix
+
+VM weekly Mar 23 ran as partial failure: stages 1-5 succeeded, snapshots OOM-killed (3.5 GB RSS on 3.7 GB VM). Fixed email alerts (EMAIL_TO assigned before .env sourced — cron has no env vars). Added 4 GB persistent swap as temporary OOM fix. Verified all 5 upstream schema gaps are real and not yet addressed. Updated gitignore to whitelist `claude_learnings.md`, `claude_methodology_log.md`, and `CLAUDE/**/*.md`.
+
+## Methodology log entries archived 2026-03-26
+
+Entries removed from active methodology log — now historical facts baked into code:
+- DB path `data/raw/moltbook.db` (established session 2)
+- UTF-8 encoding for Windows file I/O (fixed session 2)
+- Upstream remote for drift detection (active but routine)
+- Proactive rate throttle removed (caused 429 storms, session 4)
+- PowerShell daily_scrape.ps1 (active but established)
+- Comment cap revisions (settled at 500, session 7)
+- HPC approach superseded by Hetzner VM (session 6)
+- Platform launched ~Jan 15 2026 (historical fact)
+- DB portable via rsync/UPSERT design (established)
+- `--skip-empty`, `fetch_comments_only()`, `--workers N` optimizations (all baked into code, sessions 6-7)
+- Token bucket capacity=1.0 requirement (baked into code)
+- Sequential vs concurrent throughput analysis (settled)
+- Hetzner VM selection, agent enrichment count, ExtraE113 comparison (historical)
+- All scraping stages complete as of session 9
+- `--only-missing` for enrich (baked into code)
+- Weekly ~8-10h duration, comments throughput variance (operational facts)
+- `find` vs `ls glob` under `set -e` (baked into status.sh)
+- SSH config alias setup (infrastructure, one-time)
+
 ## 2026-03-20 (session 13) — Cron fix, upstream audit, health check
 
 Discovered weekly cron silently failed since Mar 17: Ubuntu 24.04 has no `python` binary (only `python3`), so all scraper stages exited immediately. Fixed both `weekly_scrape.sh` and `monthly_rescrape.sh` to use `$PYTHON="$SCRAPER_DIR/.venv/bin/python"`. Pushed fix to VM and verified with manual incremental (+18,040 posts, 7-day gap). Audited upstream repo (`daveholtz/moltbook_scraper`): only 1 commit since fork (`787f2d9`). Most changes (cursor pagination, page-based submolts, `_normalize_agent`, schema migrations) already implemented independently. Actual gaps: `claimed_by` field on agents, 4 submolt fields (`creator_id`, `post_count`, `is_nsfw`, `is_private`), `enrich_submolts()` method, COALESCE fix on submolt upsert. Email alerts confirmed working by user. Next real weekly: Mon Mar 23 02:00 UTC.

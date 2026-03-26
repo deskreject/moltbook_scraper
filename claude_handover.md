@@ -1,6 +1,6 @@
 # Claude Handover - Moltbook Scraper
 
-**Last updated**: 2026-03-23 (session 14)
+**Last updated**: 2026-03-26 (session 15)
 **Git state**: Branch `main`
 **Local machine**: Windows 11, Python 3.14.0, venv at `.venv/`
 
@@ -11,14 +11,15 @@
 | Table | Count | Status |
 |-------|-------|--------|
 | posts | ~2,139K | VM ahead (weekly ran Mar 23) |
-| submolts | 19,593+ | Complete |
+| submolts | 20,276 | Complete |
 | moderators | 18,769+ | Complete (weekly refreshes) |
 | comments | ~3,328K | Complete. 167 posts unreachable (stale API counts) |
-| agents | 171,003+ | Complete. Stubs genuinely have no bio |
-| snapshots | From 2026-03-15 | Needs refresh after weekly completes |
+| agents | 172,798 | Complete. Stubs genuinely have no bio |
+| snapshots | From 2026-03-15 | **Stale** — Mar 23 snapshot failed (OOM, now fixed with swap) |
 
-**DB size**: ~10 GB (with snapshots)
+**DB size**: ~11 GB (with snapshots)
 **VM DB is ahead** of local. Pull: `scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/`
+**VM disk**: 9.3 GB free / 38 GB (75% used, includes 4 GB swap file)
 
 ---
 
@@ -36,6 +37,7 @@
 **Push code**: `scp -r src/ scripts/ vm:~/moltbook_scraper/` then `dos2unix` on VM
 
 First successful weekly: Mar 23 02:00 UTC (verified — see [session 14 log](CLAUDE/session_logs/2026_03_23_session_log.md)).
+Mar 23 weekly: partial failure — snapshots OOM-killed. Fixed by adding 4 GB swap (session 15). Email alerts also fixed (session 15).
 
 ---
 
@@ -62,6 +64,20 @@ First successful weekly: Mar 23 02:00 UTC (verified — see [session 14 log](CLA
 
 ### 4. Fix status.sh cosmetic error counter
 Matches "0 errors" progress lines as errors. Known issue.
+
+### 5. Refactor snapshots to batch/stream (near-term, before DB doubles)
+The snapshot command currently loads all rows per table into Python memory, then bulk-inserts into `*_snapshots`. This caused an OOM kill on the 4 GB VM at 11 GB DB size (session 15). A 4 GB swap file is the temporary fix, but swap will be insufficient once the DB reaches ~8-10M total rows (estimated several months at current growth).
+
+**What to implement:**
+- Modify `src/scraper.py` snapshot functions (`save_post_snapshot`, `save_agent_snapshot`, etc.) to iterate in batches (e.g., `SELECT ... LIMIT 10000 OFFSET N`) rather than `SELECT *` into a list.
+- Each batch: fetch rows → insert into snapshot table → commit → move to next batch.
+- Memory stays flat at ~50 MB regardless of DB size.
+- No schema changes needed — only the Python iteration logic changes.
+- The swap file can be removed afterward to reclaim 4 GB disk, or kept as general headroom.
+
+**Why not expand disk instead:** The swap/memory pressure comes from the Python process loading rows into memory for the copy, not from the DB file itself. Expanding disk would not prevent the OOM — only batching the reads fixes the root cause. Disk expansion would only be needed if the DB + backups outgrow the 38 GB volume.
+
+Details: [session 15 log](CLAUDE/session_logs/2026_03_26_session_log.md), `claude_learnings.md` (Infrastructure section).
 
 ---
 

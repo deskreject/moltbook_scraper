@@ -19,7 +19,6 @@ LOG_DIR="$SCRAPER_DIR/logs"
 LOCK_FILE="/tmp/moltbook_scrape.lock"
 DATE=$(date -u +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/weekly-${DATE}.log"
-EMAIL_TO="${MOLTBOOK_ALERT_EMAIL:-}"  # Set in environment or .env
 KEEP_WEEKLY_BACKUPS=2
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -86,8 +85,9 @@ trap cleanup EXIT
 mkdir -p "$LOG_DIR" "$BACKUP_DIR"
 cd "$SCRAPER_DIR"
 
-# Source .env if present
+# Source .env if present (must come before EMAIL_TO assignment — cron has no env vars)
 [[ -f .env ]] && set -a && source .env && set +a
+EMAIL_TO="${MOLTBOOK_ALERT_EMAIL:-}"
 
 SCRIPT_START=$(date +%s)
 log "=========================================="

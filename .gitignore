@@ -69,8 +69,11 @@ logs/
 !CLAUDE.md
 !claude_handover.md
 !claude_archive.md
+!claude_learnings.md
+!claude_methodology_log.md
 !readme_api_limit.md
 !data/README.md
+!CLAUDE/**/*.md
 docs/
 
 # Misc temp files
