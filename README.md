@@ -1,34 +1,40 @@
-# Moltbook Scraper and Analysis
+## Project Overview
 
-Replication code for scraping and analyzing [Moltbook](https://moltbook.com), an AI-agent-only social network.
+Academic research project for scraping and econometrically analyzing Moltbook, an AI-agent-only social network. The project produces a working paper analyzing the social graph structure, conversation dynamics, and content patterns of AI agent interactions.
+
+**Research Question**: Is posting activity on Moltbook meaningfully social, or is it largely an as-if performance?
 
 ## Repository Structure
 
 ```
 moltbook_scraper/
-├── src/                    # Python scraper
-│   ├── cli.py              # Command-line interface
-│   ├── client.py           # Moltbook API client
-│   ├── database.py         # SQLite database schema and operations
-│   └── scraper.py          # Scraping logic
+├── src/                     # Python scraper (core data collection)
+│   ├── cli.py               # CLI entry point
+│   ├── client.py            # Moltbook API client with exponential backoff retry
+│   ├── database.py          # SQLite schema and operations
+│   └── scraper.py           # Scraping orchestration
 ├── analysis/
-│   ├── R/                  # R analysis scripts (run in order)
-│   │   ├── utils.R         # Shared utility functions
-│   │   ├── 01_load_data.R  # Load data from SQLite
-│   │   ├── 02_structural.R # Platform growth and concentration
-│   │   ├── 03_conversation.R # Thread structure analysis
-│   │   ├── 04_lexical.R    # Text and vocabulary analysis
-│   │   ├── 05_topics.R     # Topic modeling
-│   │   ├── 06_network_deep.R # Reply network analysis
+│   ├── R/                   # R analysis scripts (run sequentially)
+│   │   ├── utils.R          # Shared utilities (themes, Gini, Jaccard, etc.)
+│   │   ├── 01_load_data.R   # Load SQLite snapshots into R dataframes
+│   │   ├── 02_structural.R  # Platform growth, concentration metrics
+│   │   ├── 03_conversation.R # Thread depth, reply patterns
+│   │   ├── 04_lexical.R     # Zipf analysis, duplicates, n-grams
+│   │   ├── 05_topics.R      # Theme classification, key phrases
+│   │   ├── 06_network_deep.R # Reply network (reciprocity, clustering)
 │   │   └── 07_owner_analysis.R # Agent-owner relationships
-│   └── paper/
-│       └── working_paper.Rmd # R Markdown draft
+│   ├── data/                # Processed .rds files (gitignored)
+│   └── output/              # Figures and tables (gitignored)
 ├── latex/
-│   ├── main.tex            # Paper source
-│   └── references.bib      # Bibliography
+│   └── moltbook_analysis.tex # Paper source (natbib, booktabs)
 ├── scripts/
-│   └── daily_scrape.sh     # Automated scraping script
-└── tests/                  # Python unit tests
+│   ├── weekly_scrape.sh     # Weekly incremental (Hetzner VM cron, Mon 02:00 UTC)
+│   ├── monthly_rescrape.sh  # Monthly full re-scrape (Hetzner VM cron, 1st 02:00 UTC)
+│   ├── status.sh            # VM status dashboard (manual SSH)
+│   ├── daily_scrape.ps1     # Windows PowerShell daily scrape (legacy)
+│   ├── daily_scrape.sh      # Bash daily scrape (legacy reference)
+│   └── run_on_hpc.sh        # HPC cluster job (unused)
+└── tests/                   # pytest unit tests
 ```
 
 ## Setup
