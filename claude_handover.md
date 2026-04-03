@@ -1,6 +1,6 @@
 # Claude Handover - Moltbook Scraper
 
-**Last updated**: 2026-04-02 (session 16)
+**Last updated**: 2026-04-03 (session 17)
 **Git state**: Branch `main`
 **Local machine**: Windows 11, Python 3.14.0, venv at `.venv/`
 
@@ -53,34 +53,26 @@ Mar 23 weekly: partial failure — snapshots OOM-killed. Fixed by adding 4 GB sw
 
 ## Work Laptop Setup (incomplete — skip if on home PC)
 
-SSH to the Hetzner VM is not yet configured on the work laptop. Key generation failed due to a Windows path issue. Resume here:
+SSH to the Hetzner VM is not yet configured on the work laptop. Key and config are generated, but the public key has not been added to the VM yet.
 
-1. **Generate the key** (use Windows-style path in PowerShell or cmd):
-   ```
-   ssh-keygen -t ed25519 -C "moltbook-work-laptop" -f C:\Users\Alexander Staub\.ssh\id_ed25519_hetzner
-   ```
-   Leave passphrase empty for autonomous SSH access.
+**Completed (session 17, 2026-04-03):**
+- SSH key generated: `~/.ssh/id_ed25519_hetzner` (fingerprint: `SHA256:HNT84AN8gyZgTTRew7gp+l58NI3i890Woy6M1T6WYCY`)
+- SSH config file created: `~/.ssh/config` (alias `vm` → `root@159.69.34.240`)
 
-2. **Create SSH config** — write `C:\Users\Alexander Staub\.ssh\config`:
-   ```
-   Host vm
-       HostName 159.69.34.240
-       User root
-       IdentityFile ~/.ssh/id_ed25519_hetzner
-   ```
+**Blocked — cannot add public key to VM from work laptop:**
+- The Hetzner Cloud dashboard "Add SSH Key" only applies to **new** servers, not existing ones.
+- The Hetzner web console requires VM-level login (not Hetzner account credentials). Neither `root` with blank password, nor Hetzner account email/password worked. The original root credentials are not documented anywhere in this project.
+- **Rescue mode** is an option (Hetzner provides a temporary root password) but was not attempted.
 
-3. **Add public key to VM** (from home PC or Hetzner console):
-   ```bash
-   # Copy output of: cat ~/.ssh/id_ed25519_hetzner.pub
-   # Then on VM:
-   echo "PASTE_PUBLIC_KEY" >> ~/.ssh/authorized_keys
-   ```
+**Resume from home PC** — run this single command:
+```bash
+ssh vm 'echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJv/94DRn7cPQU9eZyRblraOOWDavcOhQiNc6bVyvGCP moltbook-work-laptop" >> ~/.ssh/authorized_keys'
+```
+Then test from work laptop: `ssh vm 'echo connected'`
 
-4. **Test**: `ssh vm 'echo connected'`
+**Investigate on home PC**: How was root access originally provisioned? Check `~/.ssh/` for the key used, and whether a root password was set. Document findings so future VM access isn't dependent on one machine. See session 12 log for original VM setup.
 
-5. **Then**: check VM cron status (the original reason for this — weekly emails never arrived, only monthly).
-
-Also missing on work laptop: `.env` file, `.venv/`, local copy of `moltbook.db`. See session 16 log.
+**Also missing on work laptop**: `.env` file, `.venv/`, local copy of `moltbook.db`. See session 16 log.
 
 ---
 

@@ -46,6 +46,12 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - **Runway estimate:** Swap buys several weeks to months. DB grows ~50-100K posts/week; the memory pressure comes from snapshot row count, not DB file size. Should hold until ~8-10M total rows before swap is also insufficient.
 - **Proper fix needed:** Refactor `src/scraper.py` snapshot functions to batch/stream rows (e.g., `SELECT ... LIMIT 10000 OFFSET N` per table) instead of loading all into memory. This would cap memory at ~50 MB regardless of DB size. See handover.md for implementation notes.
 
+**Hetzner Cloud "Add SSH Key" does not apply to existing servers (session 17, 2026-04-03).**
+- The dashboard SSH key feature only injects keys at server creation time. Adding a key there does nothing for running VMs.
+- The Hetzner web console requires VM-level credentials (root password), not Hetzner account credentials.
+- Original root credentials for this VM are undocumented — access depends entirely on the home PC's SSH key.
+- **Resolution:** Add keys via `ssh vm 'echo "KEY" >> ~/.ssh/authorized_keys'` from a machine that already has access. Document root credentials or set a password via `passwd` for emergency access.
+
 **Cron email alerts silently failed since deployment (session 15, 2026-03-26).**
 - Both `weekly_scrape.sh` and `monthly_rescrape.sh` assigned `EMAIL_TO="${MOLTBOOK_ALERT_EMAIL:-}"` in the Configuration block, *before* `.env` was sourced in the Setup block. Cron runs in a minimal environment with no inherited vars, so `EMAIL_TO` was always empty and `send_email()` short-circuited.
 - The manual `echo | msmtp` test worked because it ran in an interactive shell where the var was already exported.
