@@ -44,6 +44,9 @@ python -u -m src.cli comments --db data/raw/moltbook.db --detect-deletions --log
 # Monthly cron (1st 02:00 UTC): full re-scrape with deletion detection
 0 2 1 * *  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
 
+# Daily disk monitor (08:00 UTC): emails if >80% on either disk
+0 8 * * *  cd ~/moltbook_scraper && bash scripts/disk_monitor.sh
+
 # Check status manually (from local machine)
 ssh vm 'cd ~/moltbook_scraper && bash scripts/status.sh'
 
@@ -54,6 +57,8 @@ scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/
 scp -r src/ scripts/ vm:~/moltbook_scraper/
 ssh vm 'cd ~/moltbook_scraper && dos2unix src/*.py scripts/*.sh'
 ```
+
+**VM storage layout**: DB and backups live on 80 GB volume (`/mnt/HC_Volume_104999576/moltbook_data/`), symlinked from `data/raw/` and `data/backups/`. All paths in scripts and `scp` commands work unchanged.
 
 ### Testing
 

@@ -19,7 +19,8 @@ LOG_DIR="$SCRAPER_DIR/logs"
 LOCK_FILE="/tmp/moltbook_scrape.lock"
 DATE=$(date -u +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/weekly-${DATE}.log"
-KEEP_WEEKLY_BACKUPS=2
+KEEP_WEEKLY_BACKUPS=1
+DATA_VOLUME="/mnt/HC_Volume_104999576"
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 log() {
@@ -40,13 +41,17 @@ cleanup() {
 }
 
 check_disk() {
-    local usage
-    usage=$(df "$SCRAPER_DIR" --output=pcent | tail -1 | tr -d ' %')
-    if [[ "$usage" -ge 80 ]]; then
-        log "WARNING: Disk usage at ${usage}%"
-        send_email "[MOLTBOOK] DISK WARNING: ${usage}% used" \
-            "Disk usage on $(hostname) is at ${usage}%. Consider pruning backups or expanding disk."
-    fi
+    local usage path label
+    for path in "$SCRAPER_DIR" "$DATA_VOLUME"; do
+        [[ -d "$path" ]] || continue
+        label=$(df "$path" --output=target | tail -1 | tr -d ' ')
+        usage=$(df "$path" --output=pcent | tail -1 | tr -d ' %')
+        if [[ "$usage" -ge 80 ]]; then
+            log "WARNING: Disk usage at ${usage}% on $label"
+            send_email "[MOLTBOOK] DISK WARNING: ${usage}% on $label" \
+                "Disk usage on $(hostname) $label is at ${usage}%. Consider pruning backups or expanding disk."
+        fi
+    done
 }
 
 stage_timer() {
@@ -97,7 +102,7 @@ log "=========================================="
 # ─── DB Backup ───────────────────────────────────────────────────────────────
 log "Backing up database..."
 BACKUP_FILE="$BACKUP_DIR/moltbook-weekly-${DATE}.db"
-cp "$DB_PATH" "$BACKUP_FILE"
+sqlite3 "$DB_PATH" ".backup '$BACKUP_FILE'"
 BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
 log "Backup created: $BACKUP_FILE ($BACKUP_SIZE)"
 

@@ -230,6 +230,7 @@ class Database:
                 ("is_active", "INTEGER"),
                 ("is_verified", "INTEGER"),
                 ("last_active", "TEXT"),
+                ("claimed_by", "TEXT"),
             ],
             # Migration 4: Post snapshot new columns
             "post_snapshots": [
@@ -263,6 +264,21 @@ class Database:
                 ("is_verified", "INTEGER"),
                 ("last_active", "TEXT"),
                 ("deleted_at", "TEXT"),
+                ("claimed_by", "TEXT"),
+            ],
+            # Migration 7: Submolt fields from upstream audit (session 13)
+            "submolts": [
+                ("creator_id", "TEXT"),
+                ("post_count", "INTEGER"),
+                ("is_nsfw", "INTEGER DEFAULT 0"),
+                ("is_private", "INTEGER DEFAULT 0"),
+            ],
+            # Migration 8: Submolt snapshot new columns
+            "submolt_snapshots": [
+                ("creator_id", "TEXT"),
+                ("post_count", "INTEGER"),
+                ("is_nsfw", "INTEGER DEFAULT 0"),
+                ("is_private", "INTEGER DEFAULT 0"),
             ],
         }
         for table, columns in migrations.items():
@@ -329,8 +345,8 @@ class Database:
                               follower_count, following_count, avatar_url,
                               owner_json, metadata_json, created_at, last_updated_at,
                               display_name, posts_count, comments_count,
-                              is_active, is_verified, last_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              is_active, is_verified, last_active, claimed_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 id = COALESCE(excluded.id, agents.id),
                 description = COALESCE(excluded.description, agents.description),
@@ -347,6 +363,7 @@ class Database:
                 is_active = COALESCE(excluded.is_active, agents.is_active),
                 is_verified = COALESCE(excluded.is_verified, agents.is_verified),
                 last_active = COALESCE(excluded.last_active, agents.last_active),
+                claimed_by = COALESCE(excluded.claimed_by, agents.claimed_by),
                 last_updated_at = excluded.last_updated_at
         """, (
             agent["name"],
@@ -367,6 +384,7 @@ class Database:
             agent.get("is_active"),
             agent.get("is_verified"),
             agent.get("last_active"),
+            agent.get("claimed_by"),
         ))
         # Don't commit here - let caller batch commits
 
@@ -447,23 +465,30 @@ class Database:
         """Insert or update a submolt."""
         now = datetime.utcnow().isoformat()
         created_by_name = submolt.get("created_by", {}).get("name") if submolt.get("created_by") else None
+        creator_id = submolt.get("created_by", {}).get("id") if submolt.get("created_by") else submolt.get("creator_id")
         metadata_json = json.dumps(submolt.get("metadata")) if submolt.get("metadata") else None
 
         self.conn.execute("""
             INSERT INTO submolts (name, id, display_name, description,
                                 subscriber_count, avatar_url, banner_url,
                                 created_by_name, metadata_json, created_at, last_activity_at,
-                                last_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                last_updated_at,
+                                creator_id, post_count, is_nsfw, is_private)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
-                id = excluded.id,
-                display_name = excluded.display_name,
-                description = excluded.description,
-                subscriber_count = excluded.subscriber_count,
-                avatar_url = excluded.avatar_url,
-                banner_url = excluded.banner_url,
+                id = COALESCE(excluded.id, submolts.id),
+                display_name = COALESCE(excluded.display_name, submolts.display_name),
+                description = COALESCE(excluded.description, submolts.description),
+                subscriber_count = COALESCE(excluded.subscriber_count, submolts.subscriber_count),
+                avatar_url = COALESCE(excluded.avatar_url, submolts.avatar_url),
+                banner_url = COALESCE(excluded.banner_url, submolts.banner_url),
+                created_by_name = COALESCE(excluded.created_by_name, submolts.created_by_name),
                 metadata_json = COALESCE(excluded.metadata_json, submolts.metadata_json),
-                last_activity_at = excluded.last_activity_at,
+                last_activity_at = COALESCE(excluded.last_activity_at, submolts.last_activity_at),
+                creator_id = COALESCE(excluded.creator_id, submolts.creator_id),
+                post_count = COALESCE(excluded.post_count, submolts.post_count),
+                is_nsfw = COALESCE(excluded.is_nsfw, submolts.is_nsfw),
+                is_private = COALESCE(excluded.is_private, submolts.is_private),
                 last_updated_at = excluded.last_updated_at
         """, (
             submolt["name"],
@@ -478,6 +503,10 @@ class Database:
             submolt.get("created_at"),
             submolt.get("last_activity_at"),
             now,
+            creator_id,
+            submolt.get("post_count"),
+            submolt.get("is_nsfw"),
+            submolt.get("is_private"),
         ))
         # Don't commit here - let caller batch commits
 
@@ -632,8 +661,8 @@ class Database:
                 follower_count, following_count, avatar_url,
                 owner_json, metadata_json, created_at,
                 display_name, posts_count, comments_count,
-                is_active, is_verified, last_active, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_active, is_verified, last_active, deleted_at, claimed_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             agent["name"],
             scrape_run_id,
@@ -654,6 +683,7 @@ class Database:
             agent.get("is_verified"),
             agent.get("last_active"),
             agent.get("deleted_at"),
+            agent.get("claimed_by"),
         ))
 
     def save_comment_snapshot(self, comment: dict, scrape_run_id: int = None):
@@ -693,8 +723,9 @@ class Database:
             INSERT INTO submolt_snapshots (
                 submolt_name, scrape_run_id, submolt_id, display_name, description,
                 subscriber_count, avatar_url, banner_url,
-                created_by_name, created_at, last_activity_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_by_name, created_at, last_activity_at,
+                creator_id, post_count, is_nsfw, is_private
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             submolt["name"],
             scrape_run_id,
@@ -707,6 +738,10 @@ class Database:
             submolt.get("created_by_name"),
             submolt.get("created_at"),
             submolt.get("last_activity_at"),
+            submolt.get("creator_id"),
+            submolt.get("post_count"),
+            submolt.get("is_nsfw"),
+            submolt.get("is_private"),
         ))
 
     def upsert_moderator(self, submolt_name: str, agent_name: str, role: str = None):

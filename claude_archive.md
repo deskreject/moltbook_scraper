@@ -4,6 +4,14 @@ Synthesized records of completed work from previous sessions. See `claude_handov
 
 ---
 
+## 2026-04-08 (session 18) — VM disk recovery, storage migration, schema upgrade
+
+VM disk (38 GB) filled to 100% on Mar 30 — DB (11 GB) + 2 weekly backups (21 GB) + swap (4 GB) exceeded capacity. Apr 1 monthly and Apr 6 weekly failed silently (no email alerts either — msmtp can't write temp files on full disk). Fixed by: deleting stale backups, resizing Hetzner volume to 80 GB, migrating DB + backups to volume with symlinks, reducing weekly backup retention from 2→1, switching `cp` to `sqlite3 .backup`. Added standalone daily disk monitor cron. Applied session 13 schema gaps: `claimed_by` on agents, `creator_id`/`post_count`/`is_nsfw`/`is_private` on submolts, COALESCE on submolt upsert. Work laptop SSH key added to VM. Root password set. Local DB replaced with VM copy (11 GB, verified superset). Weekly catch-up scrape started.
+
+### Archived from handover (session 18)
+- Work laptop SSH setup saga (sessions 16-17): key generated, config created, permissions issues, public key blocked by Hetzner console. All resolved — key added from home PC, permissions fixed via PowerShell ACL.
+- "Why not expand disk" rationale for snapshots OOM: no longer relevant since disk was expanded to 80 GB volume anyway. The batch refactor is still needed for memory reasons but is lower priority.
+
 ## 2026-03-26 (session 15) — VM health check, email fix, swap fix
 
 VM weekly Mar 23 ran as partial failure: stages 1-5 succeeded, snapshots OOM-killed (3.5 GB RSS on 3.7 GB VM). Fixed email alerts (EMAIL_TO assigned before .env sourced — cron has no env vars). Added 4 GB persistent swap as temporary OOM fix. Verified all 5 upstream schema gaps are real and not yet addressed. Updated gitignore to whitelist `claude_learnings.md`, `claude_methodology_log.md`, and `CLAUDE/**/*.md`.

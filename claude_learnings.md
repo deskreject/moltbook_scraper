@@ -52,6 +52,17 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - Original root credentials for this VM are undocumented — access depends entirely on the home PC's SSH key.
 - **Resolution:** Add keys via `ssh vm 'echo "KEY" >> ~/.ssh/authorized_keys'` from a machine that already has access. Document root credentials or set a password via `passwd` for emergency access.
 
+**VM disk filled to 100%, silently broke all scrapes for 9 days (session 18, 2026-04-08).**
+- Root cause: 38 GB root disk could not hold the live DB (~11 GB) + 2 weekly backups (~21 GB) + 4 GB swap + OS. The Mar 30 weekly backup pushed usage to 100%. Both the Apr 1 monthly and Apr 6 weekly failed immediately on `cp: No space left on device`. Email alerts also failed (msmtp can't create temp files on full disk), so no notification was received.
+- **Resolution (session 18):**
+  1. Deleted stale backups to free immediate space.
+  2. Resized Hetzner volume to 80 GB; ran `resize2fs /dev/sdb`.
+  3. Moved DB and backups to the volume (`/mnt/HC_Volume_104999576/moltbook_data/`), symlinked from original paths so all scripts and `scp` commands still work.
+  4. Reduced weekly backup retention from 2 to 1. Switched backup method from `cp` to `sqlite3 .backup` (safer for live DBs).
+  5. Added standalone `disk_monitor.sh` cron (daily 08:00 UTC) that emails if either root disk or data volume exceeds 80% — runs independently of scrape scripts.
+- **Disk budget at 80 GB volume**: DB (~11 GB) + 1 weekly backup (~11 GB) + monthly pre/post (~22 GB during monthly window) = ~44 GB peak. 36 GB headroom for ~1 year of growth at ~1 GB/month.
+- **Key lesson:** Disk monitoring must be independent of the scrape pipeline. If the scrape fails due to disk, the in-script `check_disk()` never runs, and if disk is full, email sending also fails. The standalone daily cron catches issues before they cascade.
+
 **Cron email alerts silently failed since deployment (session 15, 2026-03-26).**
 - Both `weekly_scrape.sh` and `monthly_rescrape.sh` assigned `EMAIL_TO="${MOLTBOOK_ALERT_EMAIL:-}"` in the Configuration block, *before* `.env` was sourced in the Setup block. Cron runs in a minimal environment with no inherited vars, so `EMAIL_TO` was always empty and `send_email()` short-circuited.
 - The manual `echo | msmtp` test worked because it ran in an interactive shell where the var was already exported.
@@ -72,6 +83,15 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 **Comments hard cap 500/post, no pagination.**
 - Posts with >500 comments are truncated. Affects ~1,507 posts.
 - **Resolution:** Accept; sufficient for research. Pass `limit=500` to maximize coverage.
+
+---
+
+## Local Machine Safety
+
+**Never run pytest against the full 11 GB production database multiple times (session 18).**
+- Three concurrent pytest runs each loaded the DB into memory, consuming ~45 GB total and freezing the machine.
+- Root cause: retrying a background-spawned pytest command instead of waiting for the first one.
+- **Resolution:** Only run pytest once. If it goes to background, wait for the result. Tests that touch the DB should use `:memory:` or a small test fixture, not `data/raw/moltbook.db`.
 
 ---
 

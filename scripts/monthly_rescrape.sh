@@ -20,6 +20,7 @@ LOCK_FILE="/tmp/moltbook_scrape.lock"
 DATE=$(date -u +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/monthly-${DATE}.log"
 KEEP_MONTHLY_BACKUPS=1
+DATA_VOLUME="/mnt/HC_Volume_104999576"
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 log() {
@@ -40,13 +41,17 @@ cleanup() {
 }
 
 check_disk() {
-    local usage
-    usage=$(df "$SCRAPER_DIR" --output=pcent | tail -1 | tr -d ' %')
-    if [[ "$usage" -ge 80 ]]; then
-        log "WARNING: Disk usage at ${usage}%"
-        send_email "[MOLTBOOK] DISK WARNING: ${usage}% used" \
-            "Disk usage on $(hostname) is at ${usage}%. Consider pruning backups or expanding disk."
-    fi
+    local usage path label
+    for path in "$SCRAPER_DIR" "$DATA_VOLUME"; do
+        [[ -d "$path" ]] || continue
+        label=$(df "$path" --output=target | tail -1 | tr -d ' ')
+        usage=$(df "$path" --output=pcent | tail -1 | tr -d ' %')
+        if [[ "$usage" -ge 80 ]]; then
+            log "WARNING: Disk usage at ${usage}% on $label"
+            send_email "[MOLTBOOK] DISK WARNING: ${usage}% on $label" \
+                "Disk usage on $(hostname) $label is at ${usage}%. Consider pruning backups or expanding disk."
+        fi
+    done
 }
 
 stage_timer() {
@@ -110,7 +115,7 @@ send_email "[MOLTBOOK] Monthly re-scrape STARTED" \
 # ─── Pre-scrape DB Backup ────────────────────────────────────────────────────
 log "Backing up database (pre-scrape)..."
 BACKUP_PRE="$BACKUP_DIR/moltbook-monthly-pre-${DATE}.db"
-cp "$DB_PATH" "$BACKUP_PRE"
+sqlite3 "$DB_PATH" ".backup '$BACKUP_PRE'"
 log "Pre-scrape backup: $BACKUP_PRE ($(du -h "$BACKUP_PRE" | cut -f1))"
 
 # ─── Stages ──────────────────────────────────────────────────────────────────
@@ -137,7 +142,7 @@ run_stage "snapshots"    "$PYTHON" -m src.cli snapshots    --db "$DB_PATH"
 
 # ─── Post-scrape DB Backup ───────────────────────────────────────────────────
 BACKUP_POST="$BACKUP_DIR/moltbook-monthly-post-${DATE}.db"
-cp "$DB_PATH" "$BACKUP_POST"
+sqlite3 "$DB_PATH" ".backup '$BACKUP_POST'"
 log "Post-scrape backup: $BACKUP_POST ($(du -h "$BACKUP_POST" | cut -f1))"
 
 # ─── DB Stats ────────────────────────────────────────────────────────────────

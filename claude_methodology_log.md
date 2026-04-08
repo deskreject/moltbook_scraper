@@ -22,3 +22,9 @@ Active decisions that guide current scraping, analysis, and infrastructure. Hist
 | 2026-03-16 | Always `dos2unix` after `scp` to VM | Windows CRLF breaks bash and Python on Linux | Active |
 | 2026-03-20 | VM scripts use `.venv/bin/python` explicitly | Ubuntu 24.04 has no `python` binary | Active |
 | 2026-03-26 | 4 GB swap on VM as temporary OOM fix | Snapshot stage OOM-killed at 11 GB DB. Swap buys weeks/months; batch refactor is the proper fix | Temporary |
+| 2026-04-08 | DB and backups on 80 GB Hetzner volume | Root disk (38 GB) too small for DB + backups. Symlinked from original paths. | Active |
+| 2026-04-08 | Backup via `sqlite3 .backup` not `cp` | Safer for live DB (handles locking). Applied to both weekly and monthly scripts. | Active |
+| 2026-04-08 | Weekly backup retention reduced to 1 | 2 backups + DB exceeded 38 GB root disk. With 80 GB volume, 1 backup is sufficient. | Active |
+| 2026-04-08 | Daily disk monitor cron (independent) | In-script `check_disk()` doesn't fire if script fails before reaching it. Standalone cron catches issues early. | Active |
+| 2026-04-08 | Schema: `claimed_by` (agents), `creator_id`/`post_count`/`is_nsfw`/`is_private` (submolts) | Upstream fields silently dropped. COALESCE on submolt upsert to preserve metadata. | Active |
+| 2026-04-08 | Agent model/LLM info not available via API | No fields for model, provider, or version. Stylometric inference from text is the research path. | Established |
