@@ -1,25 +1,28 @@
 # Claude Handover - Moltbook Scraper
 
-**Last updated**: 2026-04-08 (session 18)
+**Last updated**: 2026-04-16 (session 20, Phase 1 done, Phase 2 audit complete, ready for Phase 3 design)
 **Git state**: Branch `main`
 **Local machine**: Windows 11, Python 3.14.0, venv at `.venv/`
 
 ---
 
-## Current DB State (2026-04-08)
+## Current DB State (2026-04-14, VM)
 
-| Table | Count | Status |
-|-------|-------|--------|
-| posts | 2,240K | Local matches VM (through Mar 30). Weekly catch-up running. |
-| submolts | 20,483 | Complete. New fields: `creator_id`, `post_count`, `is_nsfw`, `is_private` (session 18) |
-| moderators | 19,655 | Complete (weekly refreshes) |
-| comments | 3,552K | Complete. 167 posts unreachable (stale API counts) |
-| agents | 173,949 | Complete. New field: `claimed_by` (session 18) |
-| snapshots | From 2026-03-15 | **Stale** — Mar 23 & Mar 30 snapshots both failed |
+| Table | Count (VM) | Status |
+|-------|------------|--------|
+| posts | 2,449K | Two weeklies completed since Apr 8 |
+| submolts | 20,673 | `creator_id`, `post_count` populated. `is_nsfw`/`is_private` 100% false (likely genuine — see learnings) |
+| moderators | 19,844 | Complete |
+| comments | 4,159K | Complete |
+| agents | 175,891 | **`claimed_by` populated for only 1/175,891 — scraper bug, see Next Steps #2** |
+| comment_snapshots | 14.04M (8.32 GB) | All `scrape_run_id = NULL` but `scraped_at` per row preserves time identity (NOT corruption) |
+| post_snapshots | 8.65M (6.72 GB) | Same as above |
+| scrape_runs | 0 | Empty — staged CLI commands never open a run row |
 
-**DB size**: ~11 GB (with snapshots)
-**Local DB synced** with VM as of session 18. Pull: `scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/`
-**VM disk**: 55 GB free / 79 GB volume (28% used) + 30 GB free / 38 GB root (19% used)
+**DB size**: 21.0 GB (VM). Local DB (Apr 8, 11 GB) is **pre-migration** — none of the new columns exist locally.
+Pull updated DB: `scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/`
+**VM disk**: 40 GB free / 79 GB volume (48% used). Backups: 16.6 GB (one weekly copy). Root disk 19% used.
+**Volume runway at current snapshot growth (~5 GB/wk):** ~8 weeks before action required.
 
 ---
 
@@ -47,6 +50,29 @@
 
 ---
 
+## Resume next session (immediate next steps)
+
+See [session 20 log](CLAUDE/session_logs/2026_04_16_session_log.md) for verification of Apr 13 weekly + audit completion. Session 19 log retains the original phase rationale.
+
+1. **Restart backfill in tmux** (audit lock now released — verified session 20):
+   ```bash
+   ssh vm 'cd ~/moltbook_scraper && tmux new -d -s backfill "bash -c \"source .venv/bin/activate && python -u scripts/backfill_claimed_by.py --db data/raw/moltbook.db --log-file logs/backfill-claimed-by.log 2>&1 | tee -a logs/backfill-stdout.log; exec bash\""'
+   ```
+   (`exec bash` keeps the session alive if the script dies, so we can inspect stderr.)
+2. **Run submolt flag probe** (fast, one-shot):
+   ```bash
+   ssh vm 'cd ~/moltbook_scraper && .venv/bin/python scripts/probe_submolt_flags.py'
+   ```
+3. **Design Phase 3 schema migration** using `tables/snapshot_mutability_audit_2026-04-14.csv`. Headline:
+   - Comments: anchor-only (every column 0.0000 — no metrics panel needed at all).
+   - Posts: anchor-only + tiny `post_metrics` for the 3 columns that actually move (upvotes/downvotes/comment_count, all <0.003 %).
+   - Agents: first+latest anchors on live table; numeric (karma/follower/following) optional small panel.
+   - **Submolts (new — wasn't in original Phase 3 list):** `description` (8.84 %) and `subscriber_count` (9.85 %) **fail** the 5 % gate → need anchor-pair or panel. Add to migration.
+
+**Known gotcha:** SQLite is not in WAL mode. Long-running read queries (like the audit) block all writers (like the backfill). Either run sequentially or `PRAGMA journal_mode=WAL` before parallel read+write jobs.
+
+---
+
 ## Returning After Absence
 
 1. `ssh vm 'cd ~/moltbook_scraper && bash scripts/status.sh'`
@@ -65,30 +91,78 @@
 
 ---
 
-## Next Steps
+## Plan Status (session 19, 2026-04-14 — **approved**)
 
-### 1. Verify weekly scrape & new schema fields (immediate)
-Weekly scrape started 2026-04-08 ~15:08 UTC. Check completion and verify new fields (`claimed_by`, `creator_id`, `post_count`, `is_nsfw`, `is_private`) are populated:
-```sql
-SELECT COUNT(*) FROM agents WHERE claimed_by IS NOT NULL;
-SELECT COUNT(*) FROM submolts WHERE creator_id IS NOT NULL;
-```
-Then pull updated DB locally. See [session 18 log](CLAUDE/session_logs/2026_04_08_session_log.md).
+Full design, risk table, and rationale in [session 19 log](CLAUDE/session_logs/2026_04_14_session_log.md). This checklist is a pointer — update as steps complete.
 
-### 2. Run monthly scrape (after weekly completes)
-Monthly re-scrape with deletion detection. Will fully populate the new schema fields. Run manually or wait for next 1st-of-month cron.
+### Decisions locked
+- **Trajectories**: 4-week panel for comments/posts (`*_metrics`); agents get first + latest anchors only.
+- **Hot-score**: `hot_score_first` + `hot_score_first_observed_at` on live `posts` (~85 MB one-time).
+- **State flips**: event log (`*_events`) — one row per transition.
+- **Monthly scrape**: writes to same narrow tables as weekly.
+- **Compression gate**: content/title/description change-rate <5 % across existing snapshots.
+- **VM cap**: 100 GB. Projected forward growth under new design: ~10–15 MB/week (~800 MB/year).
+- **`claimed_by` backfill**: Tue–Sun gap, tmux, resumable.
 
-### 3. Run R analysis pipeline
-`analysis/R/01_load_data.R` through `07_owner_analysis.R` — requires fresh snapshots (which the weekly should produce if it succeeds this time).
+### Checklist
 
-### 4. Refactor snapshots to batch/stream (medium priority)
-Snapshot command loads all rows into memory → OOM risk. Batch `SELECT ... LIMIT 10000 OFFSET N` per table. Details: [session 15](CLAUDE/session_logs/2026_03_26_session_log.md), [session 18 archive](claude_archive.md).
+**Phase 1 — Non-policy fixes** ✅ code on VM
+- [x] 1a. `get_unenriched_agent_names()` predicate extended.
+- [x] 1b. `scripts/backfill_claimed_by.py` created; **started but died on SQLite lock** — see Resume below.
+- [x] 1c. `scrape_run_id` wired into `cli.py` snapshots.
+- [x] 1d. `scripts/probe_submolt_flags.py` created — **not yet run**.
 
-### 5. Fix pre-existing test failure (low priority)
-`test_fetch_all_posts_paginates_until_no_more` — needs update for cursor-based pagination.
+**Phase 2 — Audit snapshot mutability** ✅ complete (2026-04-16)
+- [x] 2a. `scripts/audit_snapshot_mutability.py` created, composite indexes added to VM DB.
+- [x] 2b. All 4 snapshot tables audited. CSV at `tables/snapshot_mutability_audit_2026-04-14.csv`; permanent VM table `snapshot_mutability_evidence`.
+- [x] 2c. Results reviewed — gate decisions in section below.
 
-### 6. Fix status.sh cosmetic error counter (low priority)
-Matches "0 errors" progress lines as errors. Known issue.
+**Final audit results (5 % compression gate):**
+- `comment_snapshots`: every column **0.0000** across 9.88M pairs → drop comments metrics panel entirely.
+- `post_snapshots`: every column ≤ 0.003 % across 6.20M pairs → anchor + tiny metrics panel for vote/comment counts.
+- `agent_snapshots`: content <0.1 %, numeric (karma/follower/following) 0.4–2.2 % — all pass gate.
+- `submolt_snapshots`: `description` 8.84 %, `subscriber_count` 9.85 % — **fail** gate. Add submolt schema work to Phase 3.
+
+**Phase 3 — New schema (additive, reversible)** — scope revised after audit
+- [ ] 3a. Migration in `database.py`: new tables (`post_metrics`, `post_events`, `agent_events`, `submolt_metrics`, `submolt_events`); add columns (`posts.hot_score_first`, `posts.hot_score_first_observed_at`; `agents.karma_first`, `follower_count_first`, `following_count_first`, `first_observed_at`). **No `comment_metrics` or `comment_events`** — comments are immutable per audit; first+latest anchors on live `comments` table only.
+- [ ] 3b. New `scraper.create_snapshots()` logic: change-driven metric inserts; event-log state transitions; 4-week age filter.
+- [ ] 3c. Insert-count logging + anomaly alert (R1).
+- [ ] 3d. `tests/test_snapshot_change_detection.py` — 6 cases per session-19 R9.
+
+**Phase 4 — Compress existing snapshots (⚠ USER SUPERVISION REQUIRED)**
+> Do not start this phase except in a session where the user will remain until cron is re-enabled.
+- [ ] 4a. Parquet backup to `data/backups/pre-compression_YYYY-MM-DD/*.parquet` (zstd).
+- [ ] 4b. `crontab -l > /tmp/crontab.bak && crontab -r` on VM. **Log re-enable deadline.**
+- [ ] 4c. Migrate existing snapshot data into new narrow/event tables; rename originals to `*_snapshots_v1_archive`.
+- [ ] 4d. Create compatibility VIEWs named `*_snapshots` (UNION archive + new) for R code.
+- [ ] 4e. Verify row counts + sample queries.
+- [ ] 4f. **Re-enable cron**: `crontab /tmp/crontab.bak && crontab -l`. Confirm in session log.
+- [ ] 4g. After 2 weeks stable: DROP `*_v1_archive`, DROP compat views (if R migrated), `VACUUM`.
+
+**Phase 5 — Script updates**
+- [ ] 5a. `weekly_scrape.sh` / `monthly_rescrape.sh` invocations unchanged (Python absorbs the change).
+- [ ] 5b. `disk_monitor.sh` threshold loosening.
+
+**Phase 6 — Docs / tests / R compat**
+- [ ] 6a. `CLAUDE.md` data-dictionary section updated.
+- [ ] 6b. `data/README.md` schema docs updated.
+- [ ] 6c. `claude_methodology_log.md` entry for new snapshot policy.
+- [ ] 6d. `analysis/R/` — either migrate queries or keep compat views permanently; log any R changes in methodology_log.
+
+### Deferred (low priority, unaffected)
+- Fix pre-existing `test_fetch_all_posts_paginates_until_no_more` (cursor pagination).
+- Fix `status.sh` "0 errors" false-match.
+- ~~Refactor snapshots to batch/stream~~ — **superseded** by Phase 3.
+
+### Downstream (after Phase 4 verified)
+- Pull updated DB locally: `scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/`.
+- Run R analysis pipeline `analysis/R/01_load_data.R` → `07_*`.
+
+### Monitoring (R1) — how to read new snapshot logs
+Each weekly snapshot run logs per-table: `inserted_metrics`, `inserted_events`, `entities_scanned`. Alert fires if:
+- `inserted_metrics == 0` on a table with ≥1000 entities scanned (change detection likely broken — nothing being written).
+- `inserted_metrics > 0.5 × entities_scanned` on comments/posts (change detection likely broken — writing on every scan, defeating the purpose).
+See `claude_learnings.md → Snapshot monitoring` for interpretation rules.
 
 ---
 

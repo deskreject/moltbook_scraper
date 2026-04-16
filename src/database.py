@@ -526,10 +526,19 @@ class Database:
         return [row[0] for row in cursor.fetchall()]
 
     def get_unenriched_agent_names(self) -> list[str]:
-        """Get agent names that have no description (stubs from embedded objects)."""
-        cursor = self.conn.execute(
-            "SELECT name FROM agents WHERE description IS NULL"
-        )
+        """Get agent names needing enrichment.
+
+        Returns stubs (no description) AND agents missing post-migration
+        fields like `claimed_by` on claimed accounts. The latter catches
+        the session-18 migration gap: `claimed_by` was added after most
+        agents were already enriched, so `WHERE description IS NULL` alone
+        would skip them forever. See session 19 log (2026-04-14).
+        """
+        cursor = self.conn.execute("""
+            SELECT name FROM agents
+            WHERE description IS NULL
+               OR (is_claimed = 1 AND claimed_by IS NULL)
+        """)
         return [row[0] for row in cursor.fetchall()]
 
     def get_all_post_ids(self) -> list[str]:

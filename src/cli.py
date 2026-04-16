@@ -257,8 +257,18 @@ def main():
 
         elif args.command == "snapshots":
             log("Creating snapshots...")
-            scraper.create_snapshots()
-            log("Snapshots complete.")
+            run_id = db.start_scrape_run()
+            try:
+                scraper.create_snapshots(scrape_run_id=run_id)
+                posts_count = len(db.get_all_post_ids())
+                agents_count = len(db.get_all_agent_names())
+                comments_count = db.get_comment_count()
+                submolts_count = len(db.get_all_submolt_names())
+                db.complete_scrape_run(run_id, posts_count, agents_count, comments_count, submolts_count, 'completed')
+                log(f"Snapshots complete (scrape_run_id={run_id}).")
+            except Exception:
+                db.complete_scrape_run(run_id, 0, 0, 0, 0, 'failed')
+                raise
 
     except KeyboardInterrupt:
         log("Interrupted by user.")

@@ -84,6 +84,14 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - Posts with >500 comments are truncated. Affects ~1,507 posts.
 - **Resolution:** Accept; sufficient for research. Pass `limit=500` to maximize coverage.
 
+**Agent profile is fetched by NAME, not ID (session 19, 2026-04-14).**
+- `/api/v1/agents/{id}` → 404. The working endpoint is `/api/v1/agents/profile?name=X` (see `client.py:fetch_agent_profile`).
+- Wasted half an investigation probing id-based variants. Always check the actual scraper code path before re-deriving the API surface.
+
+**`submolts.is_nsfw` and `is_private` appear constant-`false` across the dataset.**
+- Verified API returns these fields populated, but every sampled submolt is `false`. Most likely Moltbook hosts no NSFW content, and private submolts are not enumerated by the public `/submolts` listing endpoint by design.
+- **Resolution:** Treat both columns as effectively constant in this dataset; do not use as features in analysis. Confirm with one full pass across all submolts when convenient.
+
 ---
 
 ## Local Machine Safety
@@ -92,6 +100,54 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - Three concurrent pytest runs each loaded the DB into memory, consuming ~45 GB total and freezing the machine.
 - Root cause: retrying a background-spawned pytest command instead of waiting for the first one.
 - **Resolution:** Only run pytest once. If it goes to background, wait for the result. Tests that touch the DB should use `:memory:` or a small test fixture, not `data/raw/moltbook.db`.
+
+---
+
+## Schema / Migration Traps
+
+**`enrich --only-missing` skips already-enriched agents forever, even after a migration adds new enrichment columns (session 19, 2026-04-14).**
+- Session 18 migration added `agents.claimed_by`. After 2 weekly scrapes, only 1 of 175,891 rows was populated. Cause: weekly cron runs `enrich --only-missing`, which selects via `get_unenriched_agent_names()` (filters on missing `description`). The 174,275 already-enriched `is_claimed=1` agents predate the migration and never get re-fetched. Only the single newly-discovered agent since the migration got `claimed_by`.
+- The upsert uses `COALESCE(excluded.claimed_by, agents.claimed_by)` so a re-fetch is safe (NULL never overwrites). But this also means a stale non-NULL `claimed_by` is never *cleared* if an owner re-binds — acceptable trade-off given how rare that is.
+- **Resolution (planned, not yet executed):** extend the unenriched predicate to also include `is_claimed=1 AND claimed_by IS NULL`, then run a one-off backfill on the VM (~48 h at 60 req/min). Do NOT drop `--only-missing` globally — that re-enriches all 174k every weekly run.
+- **General lesson:** any migration that adds an enrichment column requires a paired backfill plan; the `--only-missing` predicate must be reviewed.
+
+**Snapshot rows have `scrape_run_id = NULL` for all 22M+ rows, but this is NOT data corruption (session 19, 2026-04-14).**
+- `scrape_runs` table is empty; staged CLI commands (used by `weekly_scrape.sh`) never open a run row, so snapshots are written with NULL run_id. Only the `full` command path creates a run row.
+- Critical: snapshot tables also have `scraped_at TEXT DEFAULT CURRENT_TIMESTAMP`. Per-row insert time is preserved, so weekly snapshots remain distinguishable as a time series.
+- **Do NOT "dedupe" snapshots by entity_id** — would destroy historical state.
+- Forward fix (low priority): make `cli.py snapshots` open/close a `scrape_runs` row and pass id through. Do not retro-assign run_ids — clustering by `scraped_at` date is sufficient if ever needed.
+
+**Snapshot growth is structural, not a bug (session 19, 2026-04-14).**
+- Each successful weekly snapshot adds ~5 GB (~6.6M rows: comments dominate). Comments are mostly immutable after a few hours, so re-snapshotting the entire `comments` table weekly is mostly wasted bytes.
+- At current cadence: ~20 GB/month, fills 80 GB volume in ~2–3 months.
+- **Resolution (approved 2026-04-14):** replaced with narrow change-driven `*_metrics` (4-week panel for comments/posts) + `*_events` log; agents track first+latest on live table. See methodology_log and session 19 log. Projected steady-state growth: ~10–15 MB/week.
+
+## Snapshot monitoring (R1 — new design, added 2026-04-14)
+
+**How to read `inserted_metrics` / `inserted_events` counts in weekly snapshot logs.**
+Each snapshot run logs per-table: `entities_scanned`, `inserted_metrics`, `inserted_events`. Rules:
+
+- **Normal**: `inserted_metrics` is a small fraction of `entities_scanned` (1–10 % for comments in the 4-week window; near-zero for mature entities). `inserted_events` is very small (transitions are rare).
+- **Alert A — change detection broken (writes too much)**: `inserted_metrics > 0.5 × entities_scanned` on a mature table. Likely the diff comparison is failing and every row is being treated as changed. Storage will explode. Stop weekly cron; inspect `scraper.create_snapshots()`.
+- **Alert B — change detection broken (writes nothing)**: `inserted_metrics == 0` on a table with ≥1000 entities scanned, where vote counts on the platform have clearly moved. Likely the write path is silently failing. Stop cron; inspect logs.
+- **Alert C — event log exploding**: `inserted_events > 1000` per run. Should be dozens, not thousands. Likely boolean comparison is broken (e.g. `0` vs `False` mismatch). Inspect event writer.
+- **Where to find**: tail of `logs/scrape-snapshots.log` after each weekly run. Monitoring alerts should also email on any of A/B/C.
+
+---
+
+## SQLite contention & index traps (session 19, 2026-04-14)
+
+**Long-running read query blocks all writers.**
+- Ran `audit_snapshot_mutability.py` (large `SELECT ... ORDER BY`) while starting `backfill_claimed_by.py` in parallel in tmux. Backfill's first `commit()` died with `sqlite3.OperationalError: database is locked`. Without WAL mode, a single long read holds a shared lock that blocks writers.
+- **Resolution:** For this DB, run heavy read audits and writers sequentially. If true parallelism is needed: `PRAGMA journal_mode=WAL` on the DB (one-time; persistent). Verify current mode via `PRAGMA journal_mode;` before flipping — WAL changes checkpoint behavior and interacts with backups.
+
+**Snapshot audits require composite (entity, scraped_at) indexes.**
+- `ORDER BY entity_col, scraped_at` on `*_snapshots` triggers a full external sort without an index that covers both columns. First audit hung 2+ h on agent_snapshots alone. After adding `idx_{table}_snap_entity_time` indexes, same audit ran in 23 s.
+- **Resolution:** The indexes now exist on the VM DB (created inline in session 19). If rebuilding from scratch, add these after any bulk snapshot load.
+
+**`tmux new -d -s NAME "cmd"` closes the session when `cmd` exits.**
+- If the command errors quickly, the tmux window vanishes and you lose the traceback. First `backfill_claimed_by` attempt looked like it "disappeared" — actually died on SQLite lock, but stderr was gone.
+- **Resolution:** Wrap commands with `bash -c "... ; exec bash"` so the shell stays alive after the process exits, and tee stderr to a log file.
 
 ---
 
