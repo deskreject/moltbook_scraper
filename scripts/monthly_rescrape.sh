@@ -17,6 +17,9 @@ DB_PATH="$SCRAPER_DIR/data/raw/moltbook.db"
 BACKUP_DIR="$SCRAPER_DIR/data/backups"
 LOG_DIR="$SCRAPER_DIR/logs"
 LOCK_FILE="/tmp/moltbook_scrape.lock"
+# Dedicated sentinel so weekly can skip cleanly (exit 0) while monthly runs.
+# See weekly_scrape.sh and CLAUDE.md "Weekly / monthly cron coordination".
+MONTHLY_SENTINEL="$SCRAPER_DIR/.monthly_running"
 DATE=$(date -u +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/monthly-${DATE}.log"
 KEEP_MONTHLY_BACKUPS=1
@@ -38,6 +41,7 @@ send_email() {
 
 cleanup() {
     rm -f "$LOCK_FILE"
+    rm -f "$MONTHLY_SENTINEL"
 }
 
 check_disk() {
@@ -95,7 +99,9 @@ if [[ -f "$LOCK_FILE" ]]; then
     rm -f "$LOCK_FILE"
 fi
 echo $$ > "$LOCK_FILE"
-trap cleanup EXIT
+# Write dedicated monthly sentinel so any cron-overlapping weekly can skip cleanly.
+date -Iseconds > "$MONTHLY_SENTINEL"
+trap cleanup EXIT INT TERM
 
 # ─── Setup ───────────────────────────────────────────────────────────────────
 mkdir -p "$LOG_DIR" "$BACKUP_DIR"

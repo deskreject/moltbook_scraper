@@ -17,6 +17,9 @@ DB_PATH="$SCRAPER_DIR/data/raw/moltbook.db"
 BACKUP_DIR="$SCRAPER_DIR/data/backups"
 LOG_DIR="$SCRAPER_DIR/logs"
 LOCK_FILE="/tmp/moltbook_scrape.lock"
+# Dedicated sentinel written by monthly_rescrape.sh so weekly can skip cleanly
+# (exit 0, no cron-failure alert) rather than treating monthly as a conflict.
+MONTHLY_SENTINEL="$SCRAPER_DIR/.monthly_running"
 DATE=$(date -u +%Y-%m-%d)
 LOG_FILE="$LOG_DIR/weekly-${DATE}.log"
 KEEP_WEEKLY_BACKUPS=1
@@ -72,6 +75,24 @@ stage_timer() {
         return 1
     fi
 }
+
+# ─── Monthly-in-progress check ──────────────────────────────────────────────
+# If a monthly run is active, skip this weekly entirely (exit 0, no alert).
+# Stale-sentinel recovery: >7 days old means monthly almost certainly crashed
+# without cleanup; warn and proceed.
+mkdir -p "$LOG_DIR"  # needed before log() can write
+if [[ -f "$MONTHLY_SENTINEL" ]]; then
+    now_s=$(date +%s)
+    sentinel_s=$(stat -c %Y "$MONTHLY_SENTINEL" 2>/dev/null || echo "$now_s")
+    age_min=$(( (now_s - sentinel_s) / 60 ))
+    if [[ "$age_min" -gt 10080 ]]; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARN: stale monthly sentinel (age ${age_min}m > 7d), removing and proceeding" | tee -a "$LOG_FILE"
+        rm -f "$MONTHLY_SENTINEL"
+    else
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Monthly in progress since $(cat "$MONTHLY_SENTINEL" 2>/dev/null). Skipping weekly." | tee -a "$LOG_FILE"
+        exit 0
+    fi
+fi
 
 # ─── Lock ────────────────────────────────────────────────────────────────────
 if [[ -f "$LOCK_FILE" ]]; then

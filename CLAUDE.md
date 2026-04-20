@@ -113,11 +113,47 @@ from the project directory
 - Embedded agents use camelCase; `_normalize_agent()` converts to snake_case
 - Rate limit: 60/min per token (production); exponential backoff on 429
 
-### Data Considerations
+### Snapshot policy (Phase 3 design — see session 21 log for rationale)
 
-- Snapshot data should be used for analysis (not live tables) for reproducibility
-- R scripts expect snapshots to exist; run `python -m src.cli snapshots` first
-- Analysis filters to snapshot timestamp via INNER JOIN
+After the Phase 3 redesign, the snapshot layer is **change-driven and narrow**, not a weekly full dump. Policy by column type:
+
+- **Text / URL / JSON on an immutable entity** (posts.title, posts.content, comments.content, author_name, submolt_name, post url): stored on the **live table only, never snapshotted**. Posts and comments are immutable after creation per the 2026-04-14 audit (0.0000 % change across 6.2 M post-pairs and 9.88 M comment-pairs).
+- **Text on a mutable entity** (agents.description, submolts.description): **first + latest anchor** on the live table via `*_first` and `*_latest` columns.
+- **Numeric counters** (karma, follower_count, following_count, upvotes, downvotes, comment_count, subscriber_count): **change-driven inserts** into `*_metrics` panels. Posts use a 4-week age cutoff; other entities have no cutoff.
+- **Booleans / enum state** (is_pinned, is_locked, is_deleted, is_spam, is_claimed, verification_status, moderator role): **event log** in `*_events` tables, one row per transition. Initial state is captured in the `*_first` anchor columns on live tables (Migration 10) — events are ONLY emitted for subsequent transitions. First observation is NOT an event.
+- **Cosmetic URLs** (avatar_url, banner_url): live table only; dropped from snapshots entirely.
+- **Hot-score**: `posts.hot_score_first` + `posts.hot_score_first_observed_at` on live table. Decay is fast enough that first-observed is the only interpretable value.
+
+**Consequences for analysis (R code):**
+- Queries that joined `post_snapshots` / `comment_snapshots` for content must now read content from `posts` / `comments` directly. Content is preserved across the lifetime of the entity.
+- Queries that need vote trajectory read from `post_metrics` (only for posts seen within 4 weeks of creation) or use `upvotes` / `downvotes` on the live table for a single latest value.
+- Queries that need state transitions (was this post pinned in week X?) read from `post_events` / `agent_events` / etc.
+- Compatibility VIEWs named `*_snapshots` will be provided during Phase 4 to ease R migration; they will be retired after R code is updated.
+
+### Deletion-content preservation
+
+`upsert_post` and `upsert_comment` use a guard clause: `content = CASE WHEN is_deleted = 1 THEN <table>.content ELSE excluded.content END`. Once a post or comment is marked deleted, its content is never overwritten, even if the API later returns a tombstone form.
+
+### Weekly / monthly cron coordination
+
+- Monthly cron runs at `55 1 1 * *` (5 minutes before weekly's Monday 02:00 slot) and writes `~/moltbook_scraper/.monthly_running` with a timestamp on start, deleted via `trap EXIT INT TERM`.
+- Weekly checks for the lock at start; skips with log line if present and <7 days old, proceeds with a warning otherwise (stale-lock recovery).
+- A given item is touched by monthly every 3 months (sharded by submolt first letter: A-H, I-P, Q-Z). Deletion detection has a ≤ 3-month lag for old content; items seen within 4 weeks are fully covered by weekly.
+
+### Legacy note
+
+Prior to Phase 4, `*_snapshots` tables contain the historical full-dump state (2026-03-11 through Phase 4 migration date). These will be archived as `*_snapshots_v1_archive` and surfaced through compatibility VIEWs during transition.
+
+### Snapshot monitoring (R1 — for new change-driven writer)
+
+Each snapshot run logs per-table: `entities_scanned`, `inserted_metrics`, `inserted_events`. Expected ranges and alerts:
+
+- **Normal**: `inserted_metrics` is a small fraction of `entities_scanned` (1–10 % for active entities; near-zero for mature ones). `inserted_events` very small (state transitions are rare).
+- **Alert A — change detection broken, writing too much**: `inserted_metrics > 0.5 × entities_scanned` on a mature table. Diff comparison is failing; storage will explode. Stop cron, inspect `scraper.create_snapshots()`.
+- **Alert B — change detection broken, writing nothing**: `inserted_metrics == 0` on a table with ≥1000 entities scanned where platform values have clearly moved. Write path is silently failing. Stop cron, inspect logs.
+- **Alert C — event log exploding**: `inserted_events > 1000` per run (excluding moderators on the very first post-migration run — see below). Should be dozens otherwise. Likely boolean comparison bug (e.g. `0` vs `False`). Inspect event writer.
+- **One-time exception**: the first snapshot after Migration 10 is expected to emit ~20k moderator events (baseline "added" for all pairs active at observation start). `post_events` and `agent_events` should be 0 on first run (initial state captured in `*_first` anchors).
+- **Where**: tail of `logs/scrape-snapshots.log` after each weekly run.
 
 ### Research Ethics
 

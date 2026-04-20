@@ -4,6 +4,22 @@ Synthesized records of completed work from previous sessions. See `claude_handov
 
 ---
 
+## 2026-04-20 (session 21) — Pruned from learnings.md + handover
+
+Moved out of `claude_learnings.md` (resolved or superseded by Phase 3 design):
+
+- **Snapshot stage OOM-killed on 4GB VM (session 15, 2026-03-26).** Snapshot command loaded all live-table rows into Python memory, hit 3.5 GB RSS on 4 GB VM, OOM-killed. Temporary fix: 4 GB swap file (`/swapfile`, persistent). Proper fix was planned as batch/stream refactor of `create_snapshots()`; **superseded by Phase 3 redesign** (change-driven writer inserts only deltas, memory becomes a non-issue).
+- **Snapshot growth is structural, not a bug (session 19, 2026-04-14).** Weekly full-dump snapshot added ~5-6 GB/week (comments dominated). Led to Phase 3 redesign. Historical context only.
+- **VM disk filled to 100 % / silent 9-day outage (session 18, 2026-04-08)** — resolved by 80 GB volume + retention reduction + standalone disk monitor cron. Kept only the generalizable lesson in learnings.md: "disk monitoring must be independent of scrape pipeline."
+
+Moved out of `claude_handover.md` (pre-session-21 task checklist structure):
+
+- The Phase 3 checklist-with-day-of-week-timings was replaced with the relative-order + verification-checkpoint format in session 21. Substantive content (phase boundaries, decisions) preserved in methodology log and session 21 log.
+
+## 2026-04-16 (session 20) — Snapshot mutability audit completed
+
+Full Phase 2 audit of all four `*_snapshots` tables on the VM DB. Per-column change rates across consecutive per-entity pairs. Results persisted in `snapshot_mutability_evidence` DB table + `tables/snapshot_mutability_audit_2026-04-14.csv`. Headline findings carried into methodology log: comment_snapshots 0.0000 % on all columns; post_snapshots ≤ 0.003 %; agent_snapshots content <0.1 %, numeric 0.4-2.2 %; submolt_snapshots description 8.84 % and subscriber_count 9.85 % (fail uniform 5 % gate, need anchor+panel). Composite indexes `idx_{table}_snap_entity_time` added during audit to fix a 2h hang. Apr 13 weekly ran cleanly (6/6 stages, 16.8 h).
+
 ## 2026-04-08 (session 18) — VM disk recovery, storage migration, schema upgrade
 
 VM disk (38 GB) filled to 100% on Mar 30 — DB (11 GB) + 2 weekly backups (21 GB) + swap (4 GB) exceeded capacity. Apr 1 monthly and Apr 6 weekly failed silently (no email alerts either — msmtp can't write temp files on full disk). Fixed by: deleting stale backups, resizing Hetzner volume to 80 GB, migrating DB + backups to volume with symlinks, reducing weekly backup retention from 2→1, switching `cp` to `sqlite3 .backup`. Added standalone daily disk monitor cron. Applied session 13 schema gaps: `claimed_by` on agents, `creator_id`/`post_count`/`is_nsfw`/`is_private` on submolts, COALESCE on submolt upsert. Work laptop SSH key added to VM. Root password set. Local DB replaced with VM copy (11 GB, verified superset). Weekly catch-up scrape started.

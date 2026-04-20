@@ -40,28 +40,15 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - Caused `[[ "$count" -gt 0 ]]` to fail with "integer expression expected".
 - **Resolution:** Pipe through `tr -d '[:space:]'` and use `${count:-0}` default.
 
-**Snapshot stage OOM-killed on 4GB VM (session 15, 2026-03-26).**
-- The snapshot command loads all rows from each live table into Python memory, then bulk-inserts into `*_snapshots` tables. At 11 GB DB / ~5.5M total rows, the Python process hit ~3.5 GB RSS and was killed by the Linux OOM killer (PID 359955, `dmesg` confirmed).
-- **Temporary fix:** Added 4 GB swap file on the VM (`/swapfile`, persistent via `/etc/fstab`). This gives ~7.7 GB total virtual memory. Disk dropped from 14 GB → 9.3 GB free (75% used), which is stable given backup pruning keeps only 2 weekly copies.
-- **Runway estimate:** Swap buys several weeks to months. DB grows ~50-100K posts/week; the memory pressure comes from snapshot row count, not DB file size. Should hold until ~8-10M total rows before swap is also insufficient.
-- **Proper fix needed:** Refactor `src/scraper.py` snapshot functions to batch/stream rows (e.g., `SELECT ... LIMIT 10000 OFFSET N` per table) instead of loading all into memory. This would cap memory at ~50 MB regardless of DB size. See handover.md for implementation notes.
-
 **Hetzner Cloud "Add SSH Key" does not apply to existing servers (session 17, 2026-04-03).**
 - The dashboard SSH key feature only injects keys at server creation time. Adding a key there does nothing for running VMs.
 - The Hetzner web console requires VM-level credentials (root password), not Hetzner account credentials.
 - Original root credentials for this VM are undocumented — access depends entirely on the home PC's SSH key.
 - **Resolution:** Add keys via `ssh vm 'echo "KEY" >> ~/.ssh/authorized_keys'` from a machine that already has access. Document root credentials or set a password via `passwd` for emergency access.
 
-**VM disk filled to 100%, silently broke all scrapes for 9 days (session 18, 2026-04-08).**
-- Root cause: 38 GB root disk could not hold the live DB (~11 GB) + 2 weekly backups (~21 GB) + 4 GB swap + OS. The Mar 30 weekly backup pushed usage to 100%. Both the Apr 1 monthly and Apr 6 weekly failed immediately on `cp: No space left on device`. Email alerts also failed (msmtp can't create temp files on full disk), so no notification was received.
-- **Resolution (session 18):**
-  1. Deleted stale backups to free immediate space.
-  2. Resized Hetzner volume to 80 GB; ran `resize2fs /dev/sdb`.
-  3. Moved DB and backups to the volume (`/mnt/HC_Volume_104999576/moltbook_data/`), symlinked from original paths so all scripts and `scp` commands still work.
-  4. Reduced weekly backup retention from 2 to 1. Switched backup method from `cp` to `sqlite3 .backup` (safer for live DBs).
-  5. Added standalone `disk_monitor.sh` cron (daily 08:00 UTC) that emails if either root disk or data volume exceeds 80% — runs independently of scrape scripts.
-- **Disk budget at 80 GB volume**: DB (~11 GB) + 1 weekly backup (~11 GB) + monthly pre/post (~22 GB during monthly window) = ~44 GB peak. 36 GB headroom for ~1 year of growth at ~1 GB/month.
-- **Key lesson:** Disk monitoring must be independent of the scrape pipeline. If the scrape fails due to disk, the in-script `check_disk()` never runs, and if disk is full, email sending also fails. The standalone daily cron catches issues before they cascade.
+**Disk monitoring must be independent of the scrape pipeline (lesson from session 18 outage).**
+- If a scrape fails due to disk-full, the in-script `check_disk()` never runs; if disk is full, email sending also fails (msmtp can't create temp files) → no alert, silent 9-day outage is possible.
+- **Resolution:** `scripts/disk_monitor.sh` runs as standalone daily cron (08:00 UTC), independent of scrape scripts, alerts on >80 % on either mount. Full outage narrative: `claude_archive.md` entry 2026-04-08.
 
 **Cron email alerts silently failed since deployment (session 15, 2026-03-26).**
 - Both `weekly_scrape.sh` and `monthly_rescrape.sh` assigned `EMAIL_TO="${MOLTBOOK_ALERT_EMAIL:-}"` in the Configuration block, *before* `.env` was sourced in the Setup block. Cron runs in a minimal environment with no inherited vars, so `EMAIL_TO` was always empty and `send_email()` short-circuited.
@@ -111,35 +98,34 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - **Resolution (planned, not yet executed):** extend the unenriched predicate to also include `is_claimed=1 AND claimed_by IS NULL`, then run a one-off backfill on the VM (~48 h at 60 req/min). Do NOT drop `--only-missing` globally — that re-enriches all 174k every weekly run.
 - **General lesson:** any migration that adds an enrichment column requires a paired backfill plan; the `--only-missing` predicate must be reviewed.
 
-**Snapshot rows have `scrape_run_id = NULL` for all 22M+ rows, but this is NOT data corruption (session 19, 2026-04-14).**
-- `scrape_runs` table is empty; staged CLI commands (used by `weekly_scrape.sh`) never open a run row, so snapshots are written with NULL run_id. Only the `full` command path creates a run row.
-- Critical: snapshot tables also have `scraped_at TEXT DEFAULT CURRENT_TIMESTAMP`. Per-row insert time is preserved, so weekly snapshots remain distinguishable as a time series.
-- **Do NOT "dedupe" snapshots by entity_id** — would destroy historical state.
-- Forward fix (low priority): make `cli.py snapshots` open/close a `scrape_runs` row and pass id through. Do not retro-assign run_ids — clustering by `scraped_at` date is sufficient if ever needed.
+**Do NOT dedupe historical `*_snapshots` by `entity_id` when `scrape_run_id IS NULL`.**
+- Historical (pre-Phase-4) snapshot rows have `scrape_run_id = NULL` because staged CLI commands never opened a `scrape_runs` row. Looks like corruption; is not. `scraped_at TEXT DEFAULT CURRENT_TIMESTAMP` preserves per-row time identity.
+- Deduping by entity_id would collapse the time series. Always cluster by `scraped_at` date instead.
+- Post-Phase-4: this is moot for new writes (narrow tables always have run_id), but the archived `*_snapshots_v1_archive` retains the NULL rows.
 
-**Snapshot growth is structural, not a bug (session 19, 2026-04-14).**
-- Each successful weekly snapshot adds ~5 GB (~6.6M rows: comments dominate). Comments are mostly immutable after a few hours, so re-snapshotting the entire `comments` table weekly is mostly wasted bytes.
-- At current cadence: ~20 GB/month, fills 80 GB volume in ~2–3 months.
-- **Resolution (approved 2026-04-14):** replaced with narrow change-driven `*_metrics` (4-week panel for comments/posts) + `*_events` log; agents track first+latest on live table. See methodology_log and session 19 log. Projected steady-state growth: ~10–15 MB/week.
+**`_migrate()` as a dict keyed by table silently drops duplicate keys (session 21, 2026-04-20).**
+- Migrations 2, 3, 7 (early per-table column additions) and Migration 9/10 (anchors) both keyed on `posts` / `agents` / `submolts`. Later entries overwrote earlier ones; only the anchor block actually ran on fresh DBs. Production DBs had the early columns applied by earlier code generations so the drop was invisible there — until the test harness created a fresh DB and hit `table submolts has no column named creator_id`.
+- **Resolution:** convert `migrations` to a `list[(table, columns)]` so blocks with the same table name both execute.
+- **General lesson:** never use a dict keyed by table-name to list migrations — migrations are append-only and may re-target the same table across generations.
 
-## Snapshot monitoring (R1 — new design, added 2026-04-14)
+**Deletion guards cannot rely on the API flipping `is_deleted` (session 21, 2026-04-20).**
+- Live probes P1 (posts) and P2 (comments) against the Moltbook API returned tombstoned items as `content='[deleted]'`, `title='[deleted]'`, AND `is_deleted:false`. The API never sets the flag; it only stops listing the row in feed endpoints. So a flag-based guard (`CASE WHEN excluded.is_deleted = 1 THEN ... END`) simply never fires in the actual observed data path.
+- **Resolution:** guard must be content-heuristic — check `excluded.content = '[deleted]'` AND preserve the stored content, AND auto-infer `is_deleted = 1` in the same UPSERT. Applied to both `upsert_post` and `upsert_comment`. The narrower flag-only guard we had at the start of session 21 would have been a no-op in production for the actual worst case.
+- **General lesson:** never design deletion-preservation logic around flags until you have empirically confirmed, with a live API call against a known-deleted row, that the platform sets the flag. Reddit-like platforms often use string-sentinel tombstones instead.
 
-**How to read `inserted_metrics` / `inserted_events` counts in weekly snapshot logs.**
-Each snapshot run logs per-table: `entities_scanned`, `inserted_metrics`, `inserted_events`. Rules:
-
-- **Normal**: `inserted_metrics` is a small fraction of `entities_scanned` (1–10 % for comments in the 4-week window; near-zero for mature entities). `inserted_events` is very small (transitions are rare).
-- **Alert A — change detection broken (writes too much)**: `inserted_metrics > 0.5 × entities_scanned` on a mature table. Likely the diff comparison is failing and every row is being treated as changed. Storage will explode. Stop weekly cron; inspect `scraper.create_snapshots()`.
-- **Alert B — change detection broken (writes nothing)**: `inserted_metrics == 0` on a table with ≥1000 entities scanned, where vote counts on the platform have clearly moved. Likely the write path is silently failing. Stop cron; inspect logs.
-- **Alert C — event log exploding**: `inserted_events > 1000` per run. Should be dozens, not thousands. Likely boolean comparison is broken (e.g. `0` vs `False` mismatch). Inspect event writer.
-- **Where to find**: tail of `logs/scrape-snapshots.log` after each weekly run. Monitoring alerts should also email on any of A/B/C.
+**Change-driven event writer must fall back to the first-observation anchor when no prior event exists (session 21, 2026-04-20).**
+- Phase 3a initial draft of `_snapshot_posts` / `_snapshot_agents` read the latest `*_events` row for each (entity, field) pair and skipped emission when `None`. Intent: avoid a ~718k-row baseline spike on first run. Unintended consequence: since first observation deliberately emits no event, the first *genuine* transition after anchoring also sees `old_str is None` — so it gets skipped too, the event table stays empty, every subsequent check finds `None` again, and the log is permanently empty.
+- Caught by `tests/test_snapshot_change_detection.py::test_boolean_flip_inserts_one_event`, which failed in a way that made the design gap obvious.
+- **Resolution:** extend the SELECT in `_snapshot_posts` / `_snapshot_agents` to pull `*_first` anchor columns; when `old_str is None`, substitute the anchor as the prior value. Keeps first-run bounded (current=anchor → no diff, no emission) while emitting first flips correctly. Dryrun on the 11 GB Apr 8 copy still shows post_events=0 and agent_events=0 after the fix, matching the pre-fix bounded-spike behavior.
+- **General lesson:** when a writer defers to anchors for initial state, the change-detection code must *read* those anchors too — otherwise the anchor is a memory the writer cannot consult.
 
 ---
 
 ## SQLite contention & index traps (session 19, 2026-04-14)
 
-**Long-running read query blocks all writers.**
-- Ran `audit_snapshot_mutability.py` (large `SELECT ... ORDER BY`) while starting `backfill_claimed_by.py` in parallel in tmux. Backfill's first `commit()` died with `sqlite3.OperationalError: database is locked`. Without WAL mode, a single long read holds a shared lock that blocks writers.
-- **Resolution:** For this DB, run heavy read audits and writers sequentially. If true parallelism is needed: `PRAGMA journal_mode=WAL` on the DB (one-time; persistent). Verify current mode via `PRAGMA journal_mode;` before flipping — WAL changes checkpoint behavior and interacts with backups.
+**Long-running read query blocks all writers (pre-WAL).**
+- Ran `audit_snapshot_mutability.py` in parallel with `backfill_claimed_by.py` in tmux. Backfill's first `commit()` died with `sqlite3.OperationalError: database is locked`. Without WAL, a single long read holds a shared lock that blocks writers.
+- **Resolution (planned in Phase 3a):** `PRAGMA journal_mode=WAL` in `DatabaseManager.__init__`. Forward-safe, persistent. Until that lands: run heavy read audits and writers sequentially.
 
 **Snapshot audits require composite (entity, scraped_at) indexes.**
 - `ORDER BY entity_col, scraped_at` on `*_snapshots` triggers a full external sort without an index that covers both columns. First audit hung 2+ h on agent_snapshots alone. After adding `idx_{table}_snap_entity_time` indexes, same audit ran in 23 s.
@@ -164,3 +150,8 @@ Each snapshot run logs per-table: `entities_scanned`, `inserted_metrics`, `inser
 **status.sh error counter counts "0 errors" as errors.**
 - `grep -c "error"` matches progress lines containing "0 errors".
 - **Status:** Known cosmetic issue, not yet fixed.
+
+**Orphan `pytest` processes accumulate tens of GB of RAM when left hung.**
+- Session 21: two background `python -m pytest` tasks (no path filter → hit pre-existing-failure `test_fetch_all_posts_paginates_until_no_more`) hung instead of failing; held 43 GB + 7.7 GB RAM until manually killed next session.
+- Root cause: full-suite invocation on Windows where that test hangs; the background-task wrapper never reaps on hang.
+- **Resolution:** Always scope pytest to the affected files when running in background — e.g. `pytest tests/test_database.py tests/test_snapshot_change_detection.py`. If a full-suite run is ever needed, use `pytest --deselect tests/test_scraper.py::test_fetch_all_posts_paginates_until_no_more` or run in foreground so a hang is immediately visible. Check `tasklist | grep python` at session start and kill orphans before they pile up.

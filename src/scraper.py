@@ -505,151 +505,229 @@ class Scraper:
         self.db.mark_comments_deleted(missing_ids, uncertain=uncertain)
         return len(missing_ids)
 
+    # Boolean / enum fields whose transitions we record in *_events.
+    # Change-driven: we only insert when the value differs from the last
+    # recorded event_type row for that entity (or the first time we see it).
+    _POST_EVENT_FIELDS = (
+        "is_pinned", "is_locked", "is_deleted", "is_spam", "verification_status"
+    )
+    _AGENT_EVENT_FIELDS = ("is_claimed",)
+    # Metric fields are the small-integer counters that trickle-change.
+    # Posts use a 4-week age cutoff (audit shows 0.003% change rate; vote
+    # velocity that matters happens in the first few weeks).
+    _POST_AGE_CUTOFF_DAYS = 28
+
     def create_snapshots(self, scrape_run_id: int = None):
-        """Create daily snapshots of post, comment, agent, and submolt metrics.
+        """Change-driven snapshot writer (Phase 3 design — see session 21 log).
 
-        Args:
-            scrape_run_id: Optional ID of the scrape run these snapshots belong to.
+        Writes to narrow *_metrics and *_events tables only when values
+        differ from the previous snapshot for the same entity. Sets first-
+        observation anchor columns on live tables if still NULL.
+
+        Emits R1 monitoring lines per table:
+            <table>: entities_scanned=N, inserted_metrics=M, inserted_events=E
+        See CLAUDE.md "Snapshot monitoring" for alert thresholds.
         """
-        self._log("Creating snapshots...")
+        self._log("Creating snapshots (change-driven)...")
 
-        # Post snapshots
-        cursor = self.db.conn.execute("""
-            SELECT id, title, content, url, author_name, submolt_name,
-                   upvotes, downvotes, comment_count, is_pinned, created_at,
-                   type, is_locked, is_deleted, is_spam,
-                   verification_status, updated_at, score, hot_score
-            FROM posts
-        """)
-        post_count = 0
-        for row in cursor.fetchall():
-            self.db.save_post_snapshot({
-                "id": row[0],
-                "title": row[1],
-                "content": row[2],
-                "url": row[3],
-                "author_name": row[4],
-                "submolt_name": row[5],
-                "upvotes": row[6],
-                "downvotes": row[7],
-                "comment_count": row[8],
-                "is_pinned": row[9],
-                "created_at": row[10],
-                "type": row[11],
-                "is_locked": row[12],
-                "is_deleted": row[13],
-                "is_spam": row[14],
-                "verification_status": row[15],
-                "updated_at": row[16],
-                "score": row[17],
-                "hot_score": row[18],
-            }, scrape_run_id)
-            post_count += 1
-        self._log(f"  Created {post_count} post snapshots")
-
-        # Comment snapshots
-        cursor = self.db.conn.execute("""
-            SELECT id, post_id, parent_id, content, author_name,
-                   upvotes, downvotes, created_at,
-                   is_spam, depth, reply_count,
-                   verification_status, updated_at, score,
-                   is_deleted, deleted_detected_at, deletion_uncertain
-            FROM comments
-        """)
-        comment_count = 0
-        for row in cursor.fetchall():
-            self.db.save_comment_snapshot({
-                "id": row[0],
-                "post_id": row[1],
-                "parent_id": row[2],
-                "content": row[3],
-                "author_name": row[4],
-                "upvotes": row[5],
-                "downvotes": row[6],
-                "created_at": row[7],
-                "is_spam": row[8],
-                "depth": row[9],
-                "reply_count": row[10],
-                "verification_status": row[11],
-                "updated_at": row[12],
-                "score": row[13],
-                "is_deleted": row[14],
-                "deleted_detected_at": row[15],
-                "deletion_uncertain": row[16],
-            }, scrape_run_id)
-            comment_count += 1
-        self._log(f"  Created {comment_count} comment snapshots")
-
-        # Agent snapshots (include all agents, not just enriched ones)
-        cursor = self.db.conn.execute("""
-            SELECT name, id, description, karma, is_claimed,
-                   follower_count, following_count, avatar_url,
-                   owner_json, metadata_json, created_at,
-                   display_name, posts_count, comments_count,
-                   is_active, is_verified, last_active, deleted_at
-            FROM agents
-        """)
-        agent_count = 0
-        for row in cursor.fetchall():
-            self.db.save_agent_snapshot({
-                "name": row[0],
-                "id": row[1],
-                "description": row[2],
-                "karma": row[3],
-                "is_claimed": row[4],
-                "follower_count": row[5],
-                "following_count": row[6],
-                "avatar_url": row[7],
-                "owner_json": row[8],
-                "metadata_json": row[9],
-                "created_at": row[10],
-                "display_name": row[11],
-                "posts_count": row[12],
-                "comments_count": row[13],
-                "is_active": row[14],
-                "is_verified": row[15],
-                "last_active": row[16],
-                "deleted_at": row[17],
-            }, scrape_run_id)
-            agent_count += 1
-        self._log(f"  Created {agent_count} agent snapshots")
-
-        # Submolt snapshots
-        cursor = self.db.conn.execute("""
-            SELECT name, id, display_name, description, subscriber_count,
-                   avatar_url, banner_url, created_by_name, created_at, last_activity_at
-            FROM submolts
-        """)
-        submolt_count = 0
-        for row in cursor.fetchall():
-            self.db.save_submolt_snapshot({
-                "name": row[0],
-                "id": row[1],
-                "display_name": row[2],
-                "description": row[3],
-                "subscriber_count": row[4],
-                "avatar_url": row[5],
-                "banner_url": row[6],
-                "created_by_name": row[7],
-                "created_at": row[8],
-                "last_activity_at": row[9],
-            }, scrape_run_id)
-            submolt_count += 1
-        self._log(f"  Created {submolt_count} submolt snapshots")
-
-        # Moderator snapshots
-        cursor = self.db.conn.execute("""
-            SELECT submolt_name, agent_name, role
-            FROM moderators
-        """)
-        mod_count = 0
-        for row in cursor.fetchall():
-            self.db.save_moderator_snapshot(row[0], row[1], row[2], scrape_run_id)
-            mod_count += 1
-        self._log(f"  Created {mod_count} moderator snapshots")
+        self._snapshot_posts(scrape_run_id)
+        self._snapshot_agents(scrape_run_id)
+        self._snapshot_submolts(scrape_run_id)
+        self._snapshot_moderators(scrape_run_id)
+        # Comments: intentionally no-op. Audit shows 0.0000% change across all
+        # columns on 9.88M pairs; live table + first_seen_at suffices.
 
         self.db.commit()
         self._log("Snapshots complete")
+
+    # ----- Phase 3 per-entity snapshot helpers -----
+
+    def _snapshot_posts(self, scrape_run_id):
+        scanned = inserted_metrics = inserted_events = anchors_set = 0
+        # 4-week age cutoff for metrics; anchors are set for every post regardless
+        # (only costs a no-op UPDATE after the first time).
+        # *_first columns are fetched so the event writer can fall back to them
+        # when no prior event row exists — see the event-emission block below.
+        cursor = self.db.conn.execute(f"""
+            SELECT id, upvotes, downvotes, comment_count,
+                   is_pinned, is_locked, is_deleted, is_spam, verification_status,
+                   is_pinned_first, is_locked_first, is_deleted_first,
+                   is_spam_first, verification_status_first,
+                   hot_score, score, created_at,
+                   (julianday('now') - julianday(created_at)) AS age_days
+            FROM posts
+        """)
+        for row in cursor.fetchall():
+            scanned += 1
+            post_id = row["id"]
+
+            # Anchors (every post, once). Skips if already set.
+            # Boolean/enum anchors added in Migration 10 — capture initial state
+            # so the event-log writer can skip first-observation emissions.
+            anchors_set += self.db.set_post_anchors_if_unset(
+                post_id, row["hot_score"], row["score"],
+                row["is_pinned"], row["is_locked"], row["is_deleted"],
+                row["is_spam"], row["verification_status"]
+            )
+
+            # Metrics (only for posts ≤ 4 weeks old)
+            age = row["age_days"]
+            if age is not None and age <= self._POST_AGE_CUTOFF_DAYS:
+                last = self.db.get_latest_post_metrics(post_id)
+                current = {
+                    "upvotes": row["upvotes"],
+                    "downvotes": row["downvotes"],
+                    "comment_count": row["comment_count"],
+                }
+                if last is None or any(last[k] != current[k] for k in current):
+                    inserted_metrics += self.db.insert_post_metric(
+                        post_id, current["upvotes"], current["downvotes"],
+                        current["comment_count"], scrape_run_id
+                    )
+
+            # Events (booleans / enums, no age cutoff — flips are rare anywhere).
+            # Comparison logic:
+            #   - If a prior event row exists, compare current vs. that value.
+            #   - Otherwise, fall back to the *_first anchor: the initial state
+            #     captured on the post's first observation. This covers the
+            #     first genuine transition after anchoring. Without this
+            #     fallback, first flips are silently lost (anchor holds old
+            #     state forever, no event ever written).
+            #   - If the anchor itself is NULL (not yet set — race where
+            #     set_post_anchors_if_unset hasn't run), skip.
+            # Gating on anchor-when-no-event avoids the ~718k first-run
+            # baseline spike (Alert C) while still capturing transitions.
+            for field in self._POST_EVENT_FIELDS:
+                new_val = row[field]
+                new_str = None if new_val is None else str(new_val)
+                old_str = self.db.get_latest_post_event(post_id, field)
+                if old_str is None:
+                    anchor_val = row[f"{field}_first"]
+                    if anchor_val is None:
+                        continue
+                    old_str = str(anchor_val)
+                if old_str != new_str:
+                    inserted_events += self.db.insert_post_event(
+                        post_id, field, old_str, new_str, scrape_run_id
+                    )
+
+        self._log(
+            f"  posts: entities_scanned={scanned}, inserted_metrics={inserted_metrics}, "
+            f"inserted_events={inserted_events}, anchors_set={anchors_set}"
+        )
+
+    def _snapshot_agents(self, scrape_run_id):
+        scanned = inserted_metrics = inserted_events = anchors_set = 0
+        cursor = self.db.conn.execute("""
+            SELECT name, description, karma, is_claimed, is_claimed_first,
+                   follower_count, following_count
+            FROM agents
+        """)
+        for row in cursor.fetchall():
+            scanned += 1
+            name = row["name"]
+
+            # is_claimed anchor added in Migration 10 — avoids ~172k first-run
+            # events where every existing claimed agent would look like a flip.
+            anchors_set += self.db.set_agent_anchors_if_unset(
+                name, row["description"], row["karma"],
+                row["follower_count"], row["following_count"],
+                row["is_claimed"]
+            )
+
+            last = self.db.get_latest_agent_metrics(name)
+            current = {
+                "karma": row["karma"],
+                "follower_count": row["follower_count"],
+                "following_count": row["following_count"],
+            }
+            if last is None or any(last[k] != current[k] for k in current):
+                inserted_metrics += self.db.insert_agent_metric(
+                    name, current["karma"], current["follower_count"],
+                    current["following_count"], scrape_run_id
+                )
+
+            # Events: compare against last event; fall back to *_first anchor
+            # when no event row exists yet (otherwise first flips are lost —
+            # same pattern as _snapshot_posts).
+            for field in self._AGENT_EVENT_FIELDS:
+                new_val = row[field]
+                new_str = None if new_val is None else str(new_val)
+                old_str = self.db.get_latest_agent_event(name, field)
+                if old_str is None:
+                    anchor_val = row[f"{field}_first"]
+                    if anchor_val is None:
+                        continue
+                    old_str = str(anchor_val)
+                if old_str != new_str:
+                    inserted_events += self.db.insert_agent_event(
+                        name, field, old_str, new_str, scrape_run_id
+                    )
+
+        self._log(
+            f"  agents: entities_scanned={scanned}, inserted_metrics={inserted_metrics}, "
+            f"inserted_events={inserted_events}, anchors_set={anchors_set}"
+        )
+
+    def _snapshot_submolts(self, scrape_run_id):
+        scanned = inserted_metrics = anchors_set = 0
+        cursor = self.db.conn.execute("""
+            SELECT name, description, subscriber_count FROM submolts
+        """)
+        for row in cursor.fetchall():
+            scanned += 1
+            name = row["name"]
+
+            anchors_set += self.db.set_submolt_anchors_if_unset(
+                name, row["description"], row["subscriber_count"]
+            )
+
+            last = self.db.get_latest_submolt_metrics(name)
+            current = {"subscriber_count": row["subscriber_count"]}
+            if last is None or last["subscriber_count"] != current["subscriber_count"]:
+                inserted_metrics += self.db.insert_submolt_metric(
+                    name, current["subscriber_count"], scrape_run_id
+                )
+
+        self._log(
+            f"  submolts: entities_scanned={scanned}, inserted_metrics={inserted_metrics}, "
+            f"anchors_set={anchors_set}"
+        )
+
+    def _snapshot_moderators(self, scrape_run_id):
+        """Diff live `moderators` against latest moderator_events state.
+
+        Emits:
+          - 'added' for pairs new since last snapshot
+          - 'role_changed' for pairs whose role changed
+          - 'removed' for pairs that were active but vanished from the live table
+        """
+        live_pairs = self.db.get_all_moderator_pairs()
+        live_set = {(s, a) for s, a, _ in live_pairs}
+        scanned = len(live_pairs)
+        inserted_events = 0
+
+        for submolt, agent, role in live_pairs:
+            prev = self.db.get_latest_moderator_state(submolt, agent)
+            if prev is None or prev["event_type"] == "removed":
+                inserted_events += self.db.insert_moderator_event(
+                    submolt, agent, "added", role, scrape_run_id
+                )
+            elif prev.get("role") != role:
+                inserted_events += self.db.insert_moderator_event(
+                    submolt, agent, "role_changed", role, scrape_run_id
+                )
+
+        # Detect removals: active-from-events minus live.
+        active_from_events = self.db.get_active_moderator_pairs_from_events()
+        for pair in active_from_events - live_set:
+            inserted_events += self.db.insert_moderator_event(
+                pair[0], pair[1], "removed", None, scrape_run_id
+            )
+
+        self._log(
+            f"  moderators: entities_scanned={scanned}, inserted_events={inserted_events}"
+        )
 
     def full_scrape(self):
         """Run a complete scrape of all data."""

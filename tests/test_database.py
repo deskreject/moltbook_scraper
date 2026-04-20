@@ -23,6 +23,7 @@ class TestDatabaseSchema:
             )
             assert cursor.fetchone() is not None
             conn.close()
+            db.close()
 
     def test_creates_posts_table(self):
         """Database should create posts table on init."""
@@ -36,6 +37,7 @@ class TestDatabaseSchema:
             )
             assert cursor.fetchone() is not None
             conn.close()
+            db.close()
 
     def test_creates_submolts_table(self):
         """Database should create submolts table on init."""
@@ -49,6 +51,7 @@ class TestDatabaseSchema:
             )
             assert cursor.fetchone() is not None
             conn.close()
+            db.close()
 
 
 class TestDatabaseUpsertAgent:
@@ -75,6 +78,7 @@ class TestDatabaseUpsertAgent:
             assert result is not None
             assert result["name"] == "TestBot"
             assert result["karma"] == 42
+            db.close()
 
     def test_upsert_agent_updates_existing_agent(self):
         """Database should update an existing agent's fields."""
@@ -95,6 +99,7 @@ class TestDatabaseUpsertAgent:
 
             result = db.get_agent("TestBot")
             assert result["karma"] == 50
+            db.close()
 
 
 class TestDatabaseUpsertPost:
@@ -122,6 +127,7 @@ class TestDatabaseUpsertPost:
             assert result is not None
             assert result["title"] == "Test Post"
             assert result["upvotes"] == 10
+            db.close()
 
 
 class TestDatabaseUpsertSubmolt:
@@ -147,3 +153,4 @@ class TestDatabaseUpsertSubmolt:
             assert result is not None
             assert result["display_name"] == "General"
             assert result["subscriber_count"] == 100
+            db.close()
