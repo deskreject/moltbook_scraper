@@ -55,6 +55,7 @@ See also `readme_api_limit.md` for the deep-dive.
 - **2026-04-14:** Original plan (session 19). Dedicated one-off `scripts/backfill_claimed_by.py` in tmux for ~48 h; weekly untouched.
 - **Between 2026-04-14 and 2026-04-20:** Revised plan. `get_unenriched_agent_names()` predicate widened with `OR (is_claimed = 1 AND claimed_by IS NULL)`. Backfill absorbed into weekly cron, intended to spread over multiple weeks.
 - **2026-04-20:** Observed outcome (session 22). Widened predicate landed on the VM at some point before Apr 20; the Apr 20 weekly picked up the entire 174,939-agent backlog in one go. Rate-limit bound; expected ~48 h to complete. Once this run finishes, the `OR` branch returns ~0 rows going forward — next weekly reverts to normal enrich size.
+- **2026-04-24:** Session-22 prediction disproven (session 23). Apr 20 run took 85h, logged 174,718 enriched, but only 1 agent ended up with `claimed_by` populated. Root cause: `src/scraper.py:enrich_agents` had zero `self.db.commit()` calls — `cli.py` close() rolled back the entire transaction. All other scrape stages commit. Patch (commit every 500 + at end) committed locally as `311b0d1`; pending VM push. With the patch, one more marathon run on Apr 27 fills `claimed_by` end-to-end; subsequent weeklies revert to normal size.
 
 ## Work laptop setup
 
