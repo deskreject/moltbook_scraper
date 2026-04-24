@@ -12,16 +12,16 @@ SQLite requires no installation or server — it is built into Python. The datab
 
 **Write behaviour**: all writes use UPSERT (`ON CONFLICT DO UPDATE SET`). Re-running any scrape stage updates existing rows in place and never deletes data. Snapshot tables are append-only. It is safe to re-run any stage after a failure.
 
-## Platform Scale (as of 2026-02-28)
+## Platform Scale (as of 2026-04-24, VM)
 
 | Entity | Count |
 |--------|-------|
-| Agents | ~2,849,285 |
-| Posts | ~1,667,039 |
-| Comments | ~12,530,042 |
-| Submolts | ~18,625 |
+| Agents | ~176,547 |
+| Posts | ~2,539,294 |
+| Comments | ~4,459,599 |
+| Submolts | ~20,786 |
 
-These numbers grow daily. Run `python -m src.cli status --db data/raw/moltbook.db` to see current DB counts, and check the `/api/v1/stats` endpoint for live platform totals.
+Run `ssh vm 'bash ~/moltbook_scraper/scripts/status.sh'` for current VM counts, or `python -m src.cli status --db data/raw/moltbook.db` locally.
 
 ## Live Tables
 
@@ -35,19 +35,29 @@ AI agent profiles on Moltbook. Stub records (name + ID only) are created automat
 |--------|------|-------------|
 | name | TEXT (PK) | Unique agent username |
 | id | TEXT | Platform-assigned UUID |
-| description | TEXT | Agent bio/description |
-| karma | INTEGER | Reputation score |
-| is_claimed | BOOLEAN | Whether agent is claimed by a human owner |
-| follower_count | INTEGER | Number of followers |
-| following_count | INTEGER | Number following |
+| description | TEXT | Agent bio (latest value) |
+| karma | INTEGER | Reputation score (latest value; trajectory in `agent_metrics`) |
+| is_claimed | BOOLEAN | Whether agent is claimed by a human |
+| claimed_by | TEXT | UUID of the human operator (NULL for unclaimed agents; present on profile-endpoint responses only) |
+| follower_count | INTEGER | Follower count (latest; trajectory in `agent_metrics`) |
+| following_count | INTEGER | Following count (latest; trajectory in `agent_metrics`) |
 | avatar_url | TEXT | Profile image URL |
-| owner_json | TEXT | JSON — human owner info (only present for claimed agents) |
+| owner_json | TEXT | JSON — richer human-owner block (from profile endpoint, claimed agents only) |
 | metadata_json | TEXT | Additional platform metadata as JSON |
+| display_name | TEXT | Human-readable display name |
+| posts_count | INTEGER | Platform-reported post count |
+| comments_count | INTEGER | Platform-reported comment count |
+| is_active | INTEGER | Activity flag |
+| is_verified | INTEGER | Verification flag |
+| last_active | TEXT | Platform-reported last-active timestamp |
+| deleted_at | TEXT | Set when scraper receives 404 on profile endpoint |
 | created_at | TEXT | Account creation timestamp (ISO 8601) |
 | first_seen_at | TEXT | When scraper first encountered this agent |
-| last_updated_at | TEXT | When scraper last updated this record |
+| last_updated_at | TEXT | When scraper last upserted this record |
 
-**Note on camelCase**: embedded author objects in API responses use camelCase keys (`avatarUrl`, `followerCount`, etc.). The scraper normalises these to snake_case before writing, so all DB columns are snake_case regardless of source.
+**Why `is_claimed` and `claimed_by` are both stored.** `is_claimed` tells you *whether* a human runs the agent; `claimed_by` tells you *which* human (a stable UUID shared across all agents that human controls). Useful for operator-concentration and sockpuppet-network analyses. Note that the `claimed_by` column was added after most agents were already enriched, so it is sparsely populated pending a full re-enrich (see §Enrichment commit bug in handover).
+
+**Note on camelCase vs snake_case.** Embedded `author` objects inside `/posts` and `/comments` responses use camelCase (`avatarUrl`, `followerCount`, `isClaimed`, …). The standalone `/agents/profile` endpoint uses snake_case (`avatar_url`, `follower_count`, `is_claimed`, `claimed_by`, …). `src/client.py:_normalize_agent()` converts camelCase author objects to snake_case before writing; profile responses are used as-is. `claimed_by` is returned only by the profile endpoint — it is not present on embedded author objects.
 
 ### posts
 
@@ -86,7 +96,7 @@ All comments, including nested replies. Thread structure is reconstructable via 
 | first_seen_at | TEXT | Scraper first-seen timestamp |
 | last_updated_at | TEXT | Scraper last-update timestamp |
 
-**Note**: API returns approximately 200 comments per request (not 1,000 as previously documented). The platform-reported comment total can never be fully collected due to this cap. Validation uses an 80% tolerance threshold.
+**Note**: API caps replies at 500 per request with no pagination. The scraper passes `limit=500`. For posts with > 500 comments, only the first 500 are retrievable. Validation uses an 80 % tolerance threshold against the platform-reported comment total. Posts and comments are effectively immutable after creation (see §Snapshot policy below).
 
 ### submolts
 
@@ -135,19 +145,66 @@ Metadata about each scraping session. Used by `get_latest_snapshot_counts()` to 
 | submolts_scraped | INTEGER | Submolt count at completion |
 | status | TEXT | `completed` / `interrupted` / `failed` / `incomplete` |
 
-## Snapshot Tables
+## Snapshot policy (Phase 3 design)
 
-Point-in-time copies of live tables, used for reproducible analysis. Each snapshot row includes `scraped_at` and `scrape_run_id` to link back to the scrape run that produced it. Created by running `python -m src.cli snapshots`.
+The database has a **three-layer design**. Different column types go to different layers depending on how they change over time. This is the authoritative mental model — the legacy full-dump `*_snapshots` tables are a transitional fat layer scheduled for retirement.
 
-R analysis scripts (`analysis/R/`) use snapshot tables exclusively (not the live tables), joined via `scrape_run_id` to ensure all analysis refers to a consistent point in time.
+### Layer 1 — Live tables (primary state)
 
-| Table | Mirrors |
-|-------|---------|
-| agent_snapshots | agents |
-| post_snapshots | posts |
-| comment_snapshots | comments |
-| submolt_snapshots | submolts |
-| moderator_snapshots | moderators |
+Hold the **current** value of every field and are updated in-place on every scrape via UPSERT. Immutable columns (post title/content, comment content) are authoritative here; mutable columns hold the latest observed value.
+
+For a handful of mutable columns where the origin value is analytically useful, the live table also stores `_first` and `_latest` anchors:
+
+- `agents.description_first`, `agents.description_latest`, `agents.description_first_observed_at`
+- `submolts.description_first`, `submolts.description_latest`, `submolts.description_first_observed_at`
+- `posts.hot_score_first`, `posts.hot_score_first_observed_at` (hot-score decays too fast for a trajectory)
+
+Boolean/enum initial states (`is_pinned`, `is_deleted`, moderator `role`) are captured as `_first` anchors on live tables; subsequent transitions go to the event log (Layer 3). Cosmetic URLs (`avatar_url`, `banner_url`) are live-only and never snapshotted.
+
+### Layer 2 — `*_metrics` tables (counter trajectories)
+
+**Change-driven inserts.** One row per entity-per-scrape-run, **only when the counter differs from the last stored value**. Sparse: the vast majority of mature entities produce zero rows per run. Tables:
+
+| Table | Counters tracked | Cutoff |
+|-------|------------------|--------|
+| post_metrics | upvotes, downvotes, comment_count, hot_score | 4 weeks after `posts.created_at` (hot lifecycle ends) |
+| agent_metrics | karma, follower_count, following_count, posts_count, comments_count | none |
+| comment_metrics | upvotes, downvotes | none (comments effectively immutable; this table is usually empty) |
+| submolt_metrics | subscriber_count | none |
+
+Query pattern for "karma trajectory of agent X": `SELECT scraped_at, karma FROM agent_metrics WHERE agent_name = 'X' ORDER BY scraped_at`.
+
+### Layer 3 — `*_events` tables (state-transition log)
+
+**One row per transition** of a boolean or enum. Very sparse (moderator add/remove, post pin/lock, agent verification change, `is_deleted` flip). Initial state is captured in the `_first` anchor on the live table — events are emitted only for *subsequent* transitions.
+
+| Table | Transitions logged |
+|-------|--------------------|
+| post_events | is_pinned, is_locked, is_deleted, is_spam |
+| agent_events | is_claimed, is_verified, deleted_at → non-NULL |
+| submolt_events | verification status, private/public |
+| moderator_events | role added / role removed / role changed |
+
+First snapshot run after Phase 3a migration emits a ~19,655-row moderator-events baseline (by design — one "added" event per existing moderator pair). Post/agent/submolt events should be 0 on first run.
+
+### Layer 4 — Legacy `*_snapshots` tables (to be retired in Phase 4)
+
+Holds historical full-dump rows (one per entity per weekly scrape) from 2026-03-11 through the Phase 4 migration date. Will be renamed to `*_snapshots_v1_archive`; compatibility VIEWs named `*_snapshots` will bridge existing R analysis code during the transition. Currently these tables contain ~15 GB of data that Phase 4 compresses to Parquet.
+
+### Table summary
+
+| Table family | Rows per entity per run | Purpose |
+|---|---|---|
+| Live (`agents`, `posts`, `comments`, `submolts`, `moderators`) | always 1 row per entity (UPSERT) | current state |
+| `*_metrics` | 0–1 row per entity per run (sparse) | counter trajectories |
+| `*_events` | typically 0 rows per entity per run | state transitions |
+| Legacy `*_snapshots` | 1 row per entity per run (dense) | historical full dump; retire in Phase 4 |
+| `scrape_runs` | 1 row per scrape run | metadata (row count, status) |
+
+### Migration status
+
+- Phase 3a (narrow change-driven writer + `_first`/`_latest` anchors) is committed locally as `86d543d`; **not yet pushed to VM**. Until pushed, the weekly cron still writes the legacy `*_snapshots` layer as full dumps. See `claude_handover.md` for push plan.
+- Phase 4 (compress `*_snapshots` to Parquet, swap in compatibility VIEWs) is deferred until the Apr 20 weekly is stable post-push.
 
 ## Scrape Stages
 

@@ -1,103 +1,80 @@
-# Claude Archive - Moltbook Scraper
+# Claude Archive — Moltbook Scraper
 
-Synthesized records of completed work from previous sessions. See `claude_handover.md` for current state.
+Completed or superseded work, organized by topic. Dates preserved inline as `YYYY-MM-DD:`. Entries are abbreviated; follow the session-log pointer if the full context still matters.
 
 ---
 
-## 2026-04-20 (session 21) — Pruned from learnings.md + handover
+## Project foundation
 
-Moved out of `claude_learnings.md` (resolved or superseded by Phase 3 design):
+- **2026-02-05:** Initial setup (session 1). Created `CLAUDE.md`, audited codebase, identified missing infrastructure (no venv, `.env`, or `data/`; Mac-hardcoded script paths).
+- **2026-02-13:** Environment bootstrap (session 2). Created `.venv`, installed deps, `data/raw/` / `logs/` / `analysis/` directories, Windows UTF-8 fix in `src/cli.py`, added upstream remote. Platform scale at this point: ~2.4M agents, ~757K posts, ~12.1M comments, ~17.3K submolts.
 
-- **Snapshot stage OOM-killed on 4GB VM (session 15, 2026-03-26).** Snapshot command loaded all live-table rows into Python memory, hit 3.5 GB RSS on 4 GB VM, OOM-killed. Temporary fix: 4 GB swap file (`/swapfile`, persistent). Proper fix was planned as batch/stream refactor of `create_snapshots()`; **superseded by Phase 3 redesign** (change-driven writer inserts only deltas, memory becomes a non-issue).
-- **Snapshot growth is structural, not a bug (session 19, 2026-04-14).** Weekly full-dump snapshot added ~5-6 GB/week (comments dominated). Led to Phase 3 redesign. Historical context only.
-- **VM disk filled to 100 % / silent 9-day outage (session 18, 2026-04-08)** — resolved by 80 GB volume + retention reduction + standalone disk monitor cron. Kept only the generalizable lesson in learnings.md: "disk monitoring must be independent of scrape pipeline."
+## API quirks and drift
 
-Moved out of `claude_handover.md` (pre-session-21 task checklist structure):
+- **2026-02-28:** Breaking upstream API changes (session 4). Stats fields renamed to `totalX`; submolts switched to page-based; posts switched to cursor-based; comments moved to a separate endpoint. Fixed wholesale in `src/client.py`, aligned with upstream `787f2d9`.
+- **2026-03-02:** `sort=new` fix (session 5). Default `sort=hot` was capped at ~3 days of high-engagement content (~70K posts). Switched to `sort=new` for full archive access. Platform launched ~Jan 15 2026.
+- **2026-03-05:** API source audit (session 7). Confirmed comment cap is 500 (not ~200), no pagination. Production rate limit is 60/min (source says 100) — see also `readme_api_limit.md`.
 
-- The Phase 3 checklist-with-day-of-week-timings was replaced with the relative-order + verification-checkpoint format in session 21. Substantive content (phase boundaries, decisions) preserved in methodology log and session 21 log.
+## Rate limits and concurrency
 
-## 2026-04-16 (session 20) — Snapshot mutability audit completed
+See also `readme_api_limit.md` for the deep-dive.
 
-Full Phase 2 audit of all four `*_snapshots` tables on the VM DB. Per-column change rates across consecutive per-entity pairs. Results persisted in `snapshot_mutability_evidence` DB table + `tables/snapshot_mutability_audit_2026-04-14.csv`. Headline findings carried into methodology log: comment_snapshots 0.0000 % on all columns; post_snapshots ≤ 0.003 %; agent_snapshots content <0.1 %, numeric 0.4-2.2 %; submolt_snapshots description 8.84 % and subscriber_count 9.85 % (fail uniform 5 % gate, need anchor+panel). Composite indexes `idx_{table}_snap_entity_time` added during audit to fix a 2h hang. Apr 13 weekly ran cleanly (6/6 stages, 16.8 h).
+- **2026-02-13:** Sliding-window throttle added then removed (sessions 3→4). Caused cold-start 429 storms.
+- **2026-03-03:** Multi-worker optimization attempt (session 6). `--skip-empty`, `fetch_comments_only()`, `ThreadPoolExecutor + _TokenBucket`. DB writes kept in main thread for SQLite safety.
+- **2026-03-06:** Multi-worker slowness root cause (session 8). Three compounding bugs: bucket capacity=9 (burst spikes), `acquire()` outside retry loop (6× actual HTTP rate), rate set to 90/min when prod limit is 60. Also triggered infrastructure-level IP ban (Cloudflare, 15+ min cooldown). Conclusion: sequential (1 worker) at ~25 req/min beats concurrent by ~2.5×. Parallelize across machines/IPs, not threads. Comments scrape moved to dedicated Hetzner VM.
 
-## 2026-04-08 (session 18) — VM disk recovery, storage migration, schema upgrade
+## Phase 0: initial scraping completion
 
-VM disk (38 GB) filled to 100% on Mar 30 — DB (11 GB) + 2 weekly backups (21 GB) + swap (4 GB) exceeded capacity. Apr 1 monthly and Apr 6 weekly failed silently (no email alerts either — msmtp can't write temp files on full disk). Fixed by: deleting stale backups, resizing Hetzner volume to 80 GB, migrating DB + backups to volume with symlinks, reducing weekly backup retention from 2→1, switching `cp` to `sqlite3 .backup`. Added standalone daily disk monitor cron. Applied session 13 schema gaps: `claimed_by` on agents, `creator_id`/`post_count`/`is_nsfw`/`is_private` on submolts, COALESCE on submolt upsert. Work laptop SSH key added to VM. Root password set. Local DB replaced with VM copy (11 GB, verified superset). Weekly catch-up scrape started.
+- **2026-03-11:** All scraping stages complete (session 9). Comments scrape finished after ~4.7 days on VM: 2,066,042 comments from 433,850 posts. Mop-up recovered 29,918 more. 167 posts unreachable (stale deleted-comment counts, not a bug). Enrich: 7,160 stubs via `--only-missing` in ~48 min. DB copied to local (3.0 GB). Snapshots created (5.7 GB). Coverage: 93.4% posts, 20.6% comments (API 500/post cap), 5.8% agents (only those who posted/commented/moderated), 97% submolts.
 
-### Archived from handover (session 18)
-- Work laptop SSH setup saga (sessions 16-17): key generated, config created, permissions issues, public key blocked by Hetzner console. All resolved — key added from home PC, permissions fixed via PowerShell ACL.
-- "Why not expand disk" rationale for snapshots OOM: no longer relevant since disk was expanded to 80 GB volume anyway. The batch refactor is still needed for memory reasons but is lower priority.
+## Schema evolution
 
-## 2026-03-26 (session 15) — VM health check, email fix, swap fix
+- **2026-03-13:** Schema migrations + deletion detection (sessions 10-11). Added missing API fields on posts (type, is_locked, is_spam, verification_status, score, hot_score), comments (is_spam, depth, reply_count, score), agents (display_name, posts_count, is_active, last_active, deleted_at). `mark_posts_deleted()` / `mark_comments_deleted()`, 404 → `deleted_at` on enrich, `--detect-deletions` CLI flag.
+- **2026-04-08:** Session 13 schema gaps applied (session 18). `claimed_by` on agents; `creator_id`/`post_count`/`is_nsfw`/`is_private` on submolts; COALESCE on submolt upsert to preserve metadata. Identified in session 13 but not applied until session 18 alongside the disk recovery work.
 
-VM weekly Mar 23 ran as partial failure: stages 1-5 succeeded, snapshots OOM-killed (3.5 GB RSS on 3.7 GB VM). Fixed email alerts (EMAIL_TO assigned before .env sourced — cron has no env vars). Added 4 GB persistent swap as temporary OOM fix. Verified all 5 upstream schema gaps are real and not yet addressed. Updated gitignore to whitelist `claude_learnings.md`, `claude_methodology_log.md`, and `CLAUDE/**/*.md`.
+## VM infrastructure
 
-## Methodology log entries archived 2026-03-26
+- **2026-03-13 → 16:** Hetzner VM deployment (session 12). 10-day catch-up scrape complete. Hetzner CX23 VM (Nuremberg, €4.35/mo), pushed 9.9 GB DB, installed sqlite3 + msmtp + dos2unix. Cron: weekly Mon 02:00 UTC, monthly 1st 02:00 UTC. SSH alias `vm` → `root@159.69.34.240`.
+- **2026-03-20:** Silent cron failure (session 13). Ubuntu 24.04 has no `python` binary (only `python3`). All scraper stages exited for a full week. Fixed: explicit `$PYTHON=$SCRAPER_DIR/.venv/bin/python` in shell scripts.
+- **2026-03-26:** Email alerts + 4 GB swap (session 15). Email alerts silently failed since deployment (`EMAIL_TO` assigned before `.env` sourced). Fixed. Added 4 GB persistent swap as temporary OOM fix (later superseded by Phase 3 snapshot redesign — memory pressure came from loading all snapshot rows).
 
-Entries removed from active methodology log — now historical facts baked into code:
-- DB path `data/raw/moltbook.db` (established session 2)
-- UTF-8 encoding for Windows file I/O (fixed session 2)
-- Upstream remote for drift detection (active but routine)
-- Proactive rate throttle removed (caused 429 storms, session 4)
-- PowerShell daily_scrape.ps1 (active but established)
-- Comment cap revisions (settled at 500, session 7)
-- HPC approach superseded by Hetzner VM (session 6)
-- Platform launched ~Jan 15 2026 (historical fact)
-- DB portable via rsync/UPSERT design (established)
-- `--skip-empty`, `fetch_comments_only()`, `--workers N` optimizations (all baked into code, sessions 6-7)
-- Token bucket capacity=1.0 requirement (baked into code)
-- Sequential vs concurrent throughput analysis (settled)
-- Hetzner VM selection, agent enrichment count, ExtraE113 comparison (historical)
-- All scraping stages complete as of session 9
-- `--only-missing` for enrich (baked into code)
-- Weekly ~8-10h duration, comments throughput variance (operational facts)
-- `find` vs `ls glob` under `set -e` (baked into status.sh)
-- SSH config alias setup (infrastructure, one-time)
+## Disk recovery and backup policy
 
-## 2026-03-20 (session 13) — Cron fix, upstream audit, health check
+- **2026-04-08:** VM disk outage + storage migration (session 18). Root disk (38 GB) hit 100% on Mar 30: DB (11 GB) + 2 backups (21 GB) + swap (4 GB). Apr 1 monthly and Apr 6 weekly failed silently. Email alerts also failed (msmtp needs temp space). Resolution: deleted stale backups, resized Hetzner volume to 80 GB, migrated DB + backups to volume with symlinks, reduced backup retention from 2→1, switched `cp` to `sqlite3 .backup`, added standalone daily disk monitor cron. Work laptop SSH key added, root password set. Generalizable lesson retained in `claude_learnings.md`.
 
-Discovered weekly cron silently failed since Mar 17: Ubuntu 24.04 has no `python` binary (only `python3`), so all scraper stages exited immediately. Fixed both `weekly_scrape.sh` and `monthly_rescrape.sh` to use `$PYTHON="$SCRAPER_DIR/.venv/bin/python"`. Pushed fix to VM and verified with manual incremental (+18,040 posts, 7-day gap). Audited upstream repo (`daveholtz/moltbook_scraper`): only 1 commit since fork (`787f2d9`). Most changes (cursor pagination, page-based submolts, `_normalize_agent`, schema migrations) already implemented independently. Actual gaps: `claimed_by` field on agents, 4 submolt fields (`creator_id`, `post_count`, `is_nsfw`, `is_private`), `enrich_submolts()` method, COALESCE fix on submolt upsert. Email alerts confirmed working by user. Next real weekly: Mon Mar 23 02:00 UTC.
+## Phase 2: snapshot mutability audit
 
-## 2026-03-13→16 (session 12) — 10-day catch-up scrape + Hetzner VM setup
+- **2026-04-16:** Audit complete (session 20). Per-column change rates across all four `*_snapshots` tables. Results in `snapshot_mutability_evidence` DB table + `tables/snapshot_mutability_audit_2026-04-14.csv`. Headlines: comment_snapshots 0.0000% on all columns; post_snapshots ≤ 0.003%; agent_snapshots content <0.1%, numeric 0.4-2.2%; submolt_snapshots description 8.84% and subscriber_count 9.85%. Composite indexes `idx_{table}_snap_entity_time` added during audit (fixed a 2h hang). Motivated the Phase 3 redesign — see session 21 log.
 
-Catch-up scrape for 10-day gap (Mar 3 → Mar 13) ran locally (user approved since <1 day). All 6 stages completed with 0 errors across ~26 hours total. Incremental: +326,541 posts (39 min, ~50 req/min), DB now 2,068,988 posts (~100% of platform). Submolts: 19,593 refreshed (~10 min). Comments: +366,589 from 130,414 posts (~16h, ~130 posts/min), DB now 3,177,832 comments. Moderators: 18,769 total from 19,593 submolts (~7h, ~47/min). Enrich: +4,005 agents (~2.5h), DB now 171,003 agents. Snapshots: all tables snapshotted (2 min). Platform stats at start: 2,863,666 agents, 19,594 submolts, 2,070,859 posts, 13,336,777 comments. Key finding: weekly scrape takes ~8-10h not ~1-2h (moderators ~7h is bottleneck at ~47/min for 19.6K submolts). Hetzner VM setup (2026-03-16): pushed 9.9 GB DB + code, installed sqlite3 + msmtp + dos2unix, set up cron jobs (weekly Mon 02:00 UTC, monthly 1st 02:00 UTC), created SSH config alias `vm`, fixed status.sh bugs (glob expansion under `set -e`, grep -c whitespace). SSH: `ssh vm` → `root@159.69.34.240`. Remaining: user to fill Gmail app password in `/root/.msmtprc` and set `MOLTBOOK_ALERT_EMAIL` in `.env`.
+## Snapshot writer OOM (superseded)
 
-## 2026-03-13 (sessions 10-11) — Schema migrations, deletion detection, automation cadence
+- **2026-03-26:** Snapshot OOM on 4 GB VM (session 15). `create_snapshots()` loaded all live-table rows into memory, hit 3.5 GB RSS, OOM-killed. Temporary fix: 4 GB swap. Superseded by Phase 3 redesign (change-driven writer inserts only deltas; memory becomes non-issue).
 
-Session 10 (2026-03-12) was interrupted mid-implementation and completed as session 11 (2026-03-13). Added schema migrations for new API fields not previously captured: posts (type, is_locked, is_spam, verification_status, updated_at, score, hot_score), comments (is_spam, depth, reply_count, verification_status, updated_at, score), agents (display_name, posts_count, comments_count, is_active, is_verified, last_active, deleted_at). Corresponding snapshot table migrations added so snapshots capture the new columns. Updated `upsert_agent()` and `upsert_comment()` to persist new fields using COALESCE to avoid overwriting enrichment-only data with NULL from partial updates. Added deletion detection: `mark_posts_deleted()` DB method + `scrape_posts(detect_deletions=True)` tracks all seen IDs during full pagination and marks unseen posts; `enrich_agents()` now catches 404 responses and sets `deleted_at`; `--detect-deletions` CLI flag wired for both `posts` and `comments` commands. Created three automation scripts for Hetzner VM: `weekly_scrape.sh` (incremental + comments + enrich + snapshots, Mon 02:00 UTC cron, lock file, DB backup, email alerts, keeps last 2 backups), `monthly_rescrape.sh` (full re-scrape with deletion detection, 1st of month 02:00 UTC, pre/post backups, email on start/fail/complete), `status.sh` (dashboard showing DB size, row counts, disk usage, backups, cron jobs, recent errors).
+## Claimed_by backfill strategy
 
-## 2026-03-11 (session 9) — Scraping complete, DB finalized, snapshots created
+- **2026-04-14:** Original plan (session 19). Dedicated one-off `scripts/backfill_claimed_by.py` in tmux for ~48 h; weekly untouched.
+- **Between 2026-04-14 and 2026-04-20:** Revised plan. `get_unenriched_agent_names()` predicate widened with `OR (is_claimed = 1 AND claimed_by IS NULL)`. Backfill absorbed into weekly cron, intended to spread over multiple weeks.
+- **2026-04-20:** Observed outcome (session 22). Widened predicate landed on the VM at some point before Apr 20; the Apr 20 weekly picked up the entire 174,939-agent backlog in one go. Rate-limit bound; expected ~48 h to complete. Once this run finishes, the `OR` branch returns ~0 rows going forward — next weekly reverts to normal enrich size.
 
-Comments scrape on Hetzner VM completed cleanly on 2026-03-10 21:13 UTC after ~4.7 days: 433,850/433,855 posts processed, 2,066,042 comments, 8 errors, 63 rate-limits. Mop-up pass recovered 29,918 additional comments from 2,725 posts missed in first run (0 errors); 167 posts remain unreachable (API returns empty despite `comment_count > 0` — stale counts from deleted comments, not a scraper bug). Agent enrichment: added `--only-missing` flag and `get_unenriched_agent_names()` DB method to avoid re-fetching all 166K agents (~111h) when only 7,160 stubs needed enrichment (~48 min). All stubs have `description IS NULL` because the agents genuinely never set a bio, not because enrichment failed. DB copied from VM to local (3.0 GB), snapshots created (5.7 GB total). All scraping stages complete — data ready for R analysis pipeline. Platform scale at scrape time: ~2.01M posts (we have 1.74M = 93.4%), ~13.21M comments (we have 2.73M = 20.6% — limited by 500/post API cap), ~2.86M agents (we have 167K = 5.8% — only those who authored posts/comments/moderated), ~19.2K submolts (we have 18.7K = 97%).
+## Work laptop setup
 
-## 2026-03-06 (session 8) — Rate limit root cause analysis, VM deployment, comments scrape restarted
+- **2026-04-02 → 2026-04-03:** SSH setup saga (sessions 16-17). Key generated, config issues, permissions, public-key blocked by Hetzner console. Resolved: key added from home PC, ACL fixed via PowerShell. Still missing on work laptop: `.env`, `.venv/`, local `moltbook.db` — see session 16 log.
 
-Diagnosed three compounding bugs causing the 16-worker comments scrape to collect zero data overnight: (1) token bucket capacity=9 allowed burst spikes, (2) `acquire()` outside retry loop let retries bypass the bucket (6× actual HTTP rate → 540 req/min against 60/min limit), (3) rate set to 90/min when production limit is 60 (confirmed via `X-RateLimit-Limit: 60` header; source code says 100 but production config differs). Also discovered infrastructure-level IP rate limiting (Cloudflare/nginx, per-IP not per-token, no headers, 15+ min cooldown) triggered by the overnight abuse. Key conclusion documented in `readme_api_limit.md`: sequential (1 worker, no token bucket) at ~25 req/min is 2.5× faster than concurrent and produces zero 429s; correct parallelism is across machines/IPs, not threads. Investigated ExtraE113/moltbook_data repo: their dataset has only ~165K posts (9% of platform) due to offset-based pagination hitting API depth cap — our 1.74M posts (93% coverage) via cursor-based pagination is irreplaceable. Deployed Hetzner CX23 VM (Nuremberg, €4.35/mo) for comments scrape: sequential mode achieves ~30-150 req/min (varies by post weight) with zero 429s. Set up tmux, watchdog (process health + progress + 6-hourly DB backups), logs. Agent enrichment revised from 166K stubs to only 7,188 (~5 hours). Comments API confirmed: hard cap 500/post, no pagination.
+## Methodology log entries retired
 
-## 2026-03-05 (session 7) — Comments scrape throughput diagnosis and fixes; API source audit
+Entries moved out of the active methodology log because they are now facts baked into code (no longer decisions that could be revisited):
 
-Moderators scrape completed (13,741 rows, 13,645 submolts with mods). Comments scrape launched with `--only-missing --skip-empty --workers 4`; diagnosed as severely slow (10.8 posts/min → 28-day projected runtime) because posts are queued `ORDER BY comment_count DESC`, making heavy-post API latency (~22s/req) the bottleneck rather than the 90/min token bucket. Audited Moltbook API source (`routes/posts.js`, `routes/index.js`, `middleware/rateLimit.js`): confirmed global 100 req/min limit per API token applied to all routes; confirmed comment limit is 500 (not ~200 as previously believed), default 100. Fixed: restarted with `--workers 16` (token bucket now saturated at 90/min for the lighter remaining posts; avg 7.3 comments/post); patched `fetch_comments_only()` to pass `limit=500`; added `--rate-limit RPM` CLI flag for future tuning without code edits; added `-u` unbuffered Python flag to diagnose silent process crashes. At session end: 19,646 posts done, 434,063 remaining (~3.3 days at 90/min). User decision: do NOT auto-start enrich after comments — assess cloud VM / second API token strategy first.
+- DB path `data/raw/moltbook.db` (session 2); UTF-8 encoding for Windows I/O (session 2); upstream remote setup.
+- Proactive rate throttle removed (session 4, caused 429 storms).
+- Comment cap revisions settled at 500 (session 7).
+- Token bucket capacity=1.0 requirement (session 8).
+- HPC approach superseded by Hetzner VM (session 6).
+- `--only-missing` for enrich (session 9); `--skip-empty`, `fetch_comments_only()`, `--workers N` (sessions 6-7).
+- `find` vs `ls glob` under `set -e` (session 12, baked into `status.sh`).
+- SSH config alias setup (session 12, one-time infrastructure).
+- Platform launched ~Jan 15 2026 (historical fact, session 5).
 
-## 2026-03-03 (session 6) — Three-stage speed optimization (Steps 1-3)
+## Handover format evolution
 
-Implemented and 30+ min tested three optimizations to reduce comment/enrich/moderator scrape duration: Step 1 (`--skip-empty`) skips 1.29M zero-comment posts (74% of corpus) via LEFT JOIN DB query, reducing comments requests 3.7×; Step 2 (`fetch_comments_only()`) drops the redundant `GET /posts/{id}` re-fetch and only calls `/posts/{id}/comments`, halving requests per post (~1.7× measured); Step 3 (`--workers N`) adds `ThreadPoolExecutor` concurrent HTTP workers with all DB writes in main thread + a shared `_TokenBucket` rate limiter (auto-enabled at 90 req/min when N>1) to prevent thundering herd 429s — without the bucket, 4 workers caused 16 req/min (worse than 1 worker); with bucket, moderators ran at ~43 req/min. All changes backward-compatible (`max_workers=1` default). Posts scrape already complete (1,742,447 posts). Moderators scrape running as of session end with `--workers 4`.
-
-## 2026-03-02 (session 5) — sort=new fix, posts scrape restarted, HPC/alternatives assessment
-
-Removed stale `affectionate-lamport` worktree and branch (session 4 changes were already committed to main). Diagnosed why posts scrape exited at 69,974 posts: default `sort=hot` endpoint is algorithmically limited to the last ~3 days of high-engagement posts; confirmed via cursor injection that `sort=new` traverses the full chronological archive (platform launched ~Jan 15 2026); added `sort` parameter (default `"new"`) to `fetch_posts()` and `fetch_posts_streaming()` in `src/client.py`; re-launched posts scrape with `sort=new` (219K posts at session end, walking back to Jan 15). Also: assessed HPC strategy (key blocker is outbound HTTPS from compute nodes; DigitalOcean/Hetzner cheap VM recommended as alternative); documented that DB is portable via rsync and UPSERT design supports cross-machine workflow.
-
-## 2026-02-28 (session 4) — Connectivity test, API drift fixes, client.py overhaul
-
-Ran submolts connectivity test which exposed three breaking API changes (stats fields renamed to `totalX`, submolts switched to page-based pagination, posts switched to cursor-based pagination, comments moved to a separate endpoint); fixed all four in `src/client.py` (wholesale alignment with upstream `787f2d9`) and `src/scraper.py` (added `_normalize_agent`, submolt upsert from posts); removed the sliding-window throttle which caused cold-start burst→429 cycling; submolts scrape completed successfully with 18,625 / 18,625 records saved across 932 pages; updated `data/README.md` with current platform scale, corrected comment cap (~200/req not 1,000), and revised full-scrape time estimates.
-
-## 2026-02-13 (session 3) — Rate-limit throttling, daily_scrape.ps1, CLAUDE.md hardening
-
-Created `scripts/daily_scrape.ps1` (PowerShell replacement for Mac-hardcoded `daily_scrape.sh`), added proactive sliding-window throttle + escalating cooldown to `src/client.py`, added `--log-file` / `_configure_logging()` to `src/cli.py`, hardened `CLAUDE.md` with context-economy and scraping-cost rules; 7/8 tests pass, 1 pre-existing failure (`test_fetch_all_posts_paginates_until_no_more`).
-
-## 2026-02-13 (session 2) — Environment bootstrap & codebase analysis
-
-Created `.venv`, installed deps, created `data/raw/` / `logs/` / `analysis/` directory structure, updated `.gitignore`, created `data/README.md`, fixed Windows UTF-8 encoding bug in `src/cli.py`, added upstream remote, confirmed smoke test and docs fetch pass; identified platform scale (~2.4M agents, ~757K posts, ~12.1M comments, ~17.3K submolts).
-
-## 2026-02-05 — Initial Setup Session
-
-Created `CLAUDE.md`, performed full codebase audit confirming all Python source is complete, identified missing infrastructure (no Python runtime, no `.env`, no `data/` directories, hardcoded Mac paths in `daily_scrape.sh`), added methodology log, established `.gitignore` whitelist pattern for project docs.
+- **2026-04-20:** Handover restructured from day-of-week checklist to relative-order + verification-checkpoint format (session 21).
+- **2026-04-21:** Handover trimmed to launchpad-only; documentation discipline formalized (see session 22 log). Archive restructured from chronological to topical.
