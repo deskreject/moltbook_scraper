@@ -93,10 +93,12 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 ## Schema / Migration Traps
 
 **`enrich --only-missing` skips already-enriched agents forever, even after a migration adds new enrichment columns (session 19, 2026-04-14).**
-- Session 18 migration added `agents.claimed_by`. After 2 weekly scrapes, only 1 of 175,891 rows was populated. Cause: weekly cron runs `enrich --only-missing`, which selects via `get_unenriched_agent_names()` (filters on missing `description`). The 174,275 already-enriched `is_claimed=1` agents predate the migration and never get re-fetched. Only the single newly-discovered agent since the migration got `claimed_by`.
-- The upsert uses `COALESCE(excluded.claimed_by, agents.claimed_by)` so a re-fetch is safe (NULL never overwrites). But this also means a stale non-NULL `claimed_by` is never *cleared* if an owner re-binds — acceptable trade-off given how rare that is.
-- **Resolution (planned, not yet executed):** extend the unenriched predicate to also include `is_claimed=1 AND claimed_by IS NULL`, then run a one-off backfill on the VM (~48 h at 60 req/min). Do NOT drop `--only-missing` globally — that re-enriches all 174k every weekly run.
-- **General lesson:** any migration that adds an enrichment column requires a paired backfill plan; the `--only-missing` predicate must be reviewed.
+- Session 18 migration added `agents.claimed_by`. After 2 weekly scrapes, only 1 of 175,891 rows was populated. Cause: weekly cron runs `enrich --only-missing`, which selects via `get_unenriched_agent_names()` (filters on missing `description`). The 174,275 already-enriched `is_claimed=1` agents predate the migration and never get re-fetched.
+- **Partial resolution (landed on VM before Apr 20):** predicate widened to `description IS NULL OR (is_claimed=1 AND claimed_by IS NULL)`. Apr 20 weekly picked up the full 174,939-agent backlog in one 85 h run.
+- **Why it didn't work (session 23, 2026-04-24):** Apr 20 run logged 174,718 "enriched" but only 1 agent ended up with `claimed_by` populated. Root cause: `src/scraper.py:enrich_agents` has zero `self.db.commit()` calls; `cli.py:db.close()` rolled back the entire transaction via sqlite3's default isolation_level. Every other stage commits — enrich was the sole outlier.
+- **Full resolution:** patched `enrich_agents` to commit every 500 successful upserts + once at end (local commit 311b0d1, pending VM push). Scratch-DB test confirmed fix.
+- **General lesson 1:** any migration that adds an enrichment column requires a paired backfill plan; the `--only-missing` predicate must be reviewed.
+- **General lesson 2:** "success" log lines that count in-memory operations do not prove persistence. Before trusting a long-running write job, grep the source for `commit()` calls in that code path, or verify with a post-run `SELECT COUNT(*)` against the column the job claims to have written.
 
 **Do NOT dedupe historical `*_snapshots` by `entity_id` when `scrape_run_id IS NULL`.**
 - Historical (pre-Phase-4) snapshot rows have `scrape_run_id = NULL` because staged CLI commands never opened a `scrape_runs` row. Looks like corruption; is not. `scraped_at TEXT DEFAULT CURRENT_TIMESTAMP` preserves per-row time identity.
