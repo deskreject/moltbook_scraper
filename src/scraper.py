@@ -322,6 +322,8 @@ class Scraper:
                         deleted_count += 1
                 except Exception:
                     error_count += 1
+                if (i + 1) % 500 == 0:
+                    self.db.commit()
                 if (i + 1) % 100 == 0:
                     self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {deleted_count} deleted, {error_count} errors)")
         else:
@@ -343,9 +345,12 @@ class Scraper:
                             deleted_count += 1
                     except Exception:
                         error_count += 1
+                    if (i + 1) % 500 == 0:
+                        self.db.commit()
                     if (i + 1) % 100 == 0:
                         self._log(f"  Progress: {i + 1}/{len(agents)} ({success_count} enriched, {deleted_count} deleted, {error_count} errors)")
 
+        self.db.commit()
         del_msg = f", {deleted_count} marked deleted" if deleted_count else ""
         self._log(f"Enriched {success_count} agents ({error_count} errors{del_msg})")
 
