@@ -80,6 +80,7 @@ docs/
 # Misc temp files
 texput.log
 *.plist
+tmp/
 
 # LaTeX build artifacts
 latex/*.aux

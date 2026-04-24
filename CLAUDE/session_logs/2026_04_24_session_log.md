@@ -149,4 +149,32 @@ All writes this session are documentation only. `git checkout -- <path>` reverts
 2. Bundle with Phase 3a push or ship separately? (Bundled = one VM touch; separate = smaller blast radius if something breaks.)
 3. Keep the widened predicate or revert it? With the commit fix, keeping it causes ONE more ~85h run Apr 27 that actually persists — after which the predicate self-clears. Reverting means Apr 27 is a normal ~7h run but `claimed_by` stays mostly NULL and needs `scripts/backfill_claimed_by.py` invoked manually (also ~48–85h at 60/min rate limit) to fill.
 
-Paused before acting on any of these, pending user decision.
+## Resolution (same session, post-pause)
+
+User chose Option A (keep widened predicate, one marathon Apr 27 run with committed writes) plus bundled push.
+
+### Push to VM — 2026-04-24 afternoon
+
+1. **Backup archive.** `scp` of the four current VM files into local `tmp/vm_backup_pre_23/` (rollback insurance).
+2. **Push.** `scp` of patched `src/scraper.py`, `src/database.py`, `scripts/weekly_scrape.sh`, `scripts/monthly_rescrape.sh` to VM.
+3. **Line endings.** `ssh vm 'dos2unix …'` on all four (CRLF → LF).
+4. **WAL flip.** `ssh vm 'sqlite3 …moltbook.db "PRAGMA journal_mode=WAL;"'` — confirmed `wal` (was `delete`). Persistent; all subsequent connections inherit it.
+5. **Cron update.** Monthly moved from `0 2 1 * *` to `55 1 1 * *`; header comment updated accordingly.
+
+### Verification (all green)
+
+- `grep self.db.commit src/scraper.py` — commits present in `enrich_agents` at lines 326, 349, 353 (every-500 in sequential path, every-500 in concurrent path, final).
+- `grep journal_mode src/database.py` — `PRAGMA journal_mode=WAL;` in `Database.__init__`.
+- `grep MONTHLY_SENTINEL scripts/weekly_scrape.sh` — check block at line 84.
+- `grep "trap" scripts/monthly_rescrape.sh` — `trap cleanup EXIT INT TERM` at line 104.
+- `.venv/bin/python -c "from src.database import Database; from src.scraper import Scraper; from src.client import MoltbookClient"` — imports clean.
+- `bash scripts/status.sh` — runs, shows new cron schedule, no active scrape, no anomalies. (Cosmetic `DB size: 0` persists — pre-existing `du`-on-symlink issue.)
+
+### Post-push doc sync
+
+- `CLAUDE.md`: monthly cron line updated to `55 1 1 * *`.
+- `claude_handover.md`: frozen state rewritten for post-push reality; Next Actions collapsed to Apr 27 post-run checkpoint + Phase 4 + deferred; return-after-delay table revised for the common-case timeline.
+
+### Net status
+
+Phase 3a writer, WAL mode, `.monthly_running` sentinel, deletion-content guard, and `enrich_agents` commit fix are ALL live on VM as of 2026-04-24 ~17:45 UTC. Apr 27 02:00 UTC weekly is the first run that exercises all of them together. Expected outcome: ~85 h marathon with 174,718 actually-persisted enrich upserts; `claimed_by` populated for ~174,905 claimed agents; first snapshot run emits ~19,655 moderator-baseline events and 0 post/agent/submolt events.

@@ -41,8 +41,8 @@ python -u -m src.cli comments --db data/raw/moltbook.db --detect-deletions --log
 # Weekly cron (Mon 02:00 UTC): incremental + comments + enrich + snapshots
 0 2 * * 1  cd ~/moltbook_scraper && bash scripts/weekly_scrape.sh
 
-# Monthly cron (1st 02:00 UTC): full re-scrape with deletion detection
-0 2 1 * *  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
+# Monthly cron (1st 01:55 UTC — 5 min before weekly slot for 1st-Monday collisions)
+55 1 1 * *  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
 
 # Daily disk monitor (08:00 UTC): emails if >80% on either disk
 0 8 * * *  cd ~/moltbook_scraper && bash scripts/disk_monitor.sh
