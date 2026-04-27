@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # monthly_rescrape.sh — Monthly full re-scrape for Moltbook on Hetzner VM
-# Cron: 0 2 1 * *  (1st of month, 02:00 UTC)
+# Cron: 55 1 * * 2  (every Tuesday 01:55 UTC; script exits on non-first-Tuesdays)
+#
+# Schedule rationale: first Tuesday of each month always lands AFTER that
+# week's Monday weekly run, so the weekly completes cleanly before monthly
+# starts. Subsequent Mondays during the monthly run skip via the
+# .monthly_running sentinel.
 #
 # Stages: posts(full, --detect-deletions) → comments(full, --detect-deletions)
 #         → enrich(--only-missing) → snapshots
@@ -9,6 +14,15 @@
 # prevent overlap (monthly takes priority).
 
 set -euo pipefail
+
+# ─── First-Tuesday-of-month guard ────────────────────────────────────────────
+# Cron fires every Tuesday at 01:55 UTC; only proceed if today is the first
+# Tuesday of the month (day-of-month ≤ 7). On other Tuesdays, exit cleanly.
+DAY_OF_MONTH=$(date -u +%-d)
+if [[ "$DAY_OF_MONTH" -gt 7 ]]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] monthly_rescrape.sh: not first Tuesday of month (day=$DAY_OF_MONTH); exiting."
+    exit 0
+fi
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 SCRAPER_DIR="$HOME/moltbook_scraper"
@@ -118,11 +132,9 @@ log "=========================================="
 send_email "[MOLTBOOK] Monthly re-scrape STARTED" \
     "Monthly full re-scrape started on $(hostname) at $(date -u).\nExpected duration: 5-7 days."
 
-# ─── Pre-scrape DB Backup ────────────────────────────────────────────────────
-log "Backing up database (pre-scrape)..."
-BACKUP_PRE="$BACKUP_DIR/moltbook-monthly-pre-${DATE}.db"
-sqlite3 "$DB_PATH" ".backup '$BACKUP_PRE'"
-log "Pre-scrape backup: $BACKUP_PRE ($(du -h "$BACKUP_PRE" | cut -f1))"
+# Pre-scrape backup intentionally omitted — most-recent weekly backup serves
+# as "before monthly" recovery point (≤7 days stale). Disk-budget decision,
+# 2026-04-27 session 24.
 
 # ─── Stages ──────────────────────────────────────────────────────────────────
 ERRORS=0
@@ -156,13 +168,11 @@ DB_SIZE=$(du -h "$DB_PATH" | cut -f1)
 DISK_FREE=$(df -h "$SCRAPER_DIR" --output=avail | tail -1 | tr -d ' ')
 log "DB size: $DB_SIZE | Disk free: $DISK_FREE"
 
-# ─── Prune old monthly backups ───────────────────────────────────────────────
-log "Pruning old monthly backups (keeping last $KEEP_MONTHLY_BACKUPS pair)..."
-for prefix in "moltbook-monthly-pre-" "moltbook-monthly-post-"; do
-    ls -1t "$BACKUP_DIR"/${prefix}*.db 2>/dev/null | tail -n +$((KEEP_MONTHLY_BACKUPS + 1)) | while read -r old; do
-        log "  Removing: $(basename "$old")"
-        rm -f "$old"
-    done
+# ─── Prune old monthly-post backups ──────────────────────────────────────────
+log "Pruning old monthly-post backups (keeping last $KEEP_MONTHLY_BACKUPS)..."
+ls -1t "$BACKUP_DIR"/moltbook-monthly-post-*.db 2>/dev/null | tail -n +$((KEEP_MONTHLY_BACKUPS + 1)) | while read -r old; do
+    log "  Removing: $(basename "$old")"
+    rm -f "$old"
 done
 
 # ─── Summary ─────────────────────────────────────────────────────────────────

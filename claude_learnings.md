@@ -101,9 +101,9 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - **General lesson 2:** "success" log lines that count in-memory operations do not prove persistence. Before trusting a long-running write job, grep the source for `commit()` calls in that code path, or verify with a post-run `SELECT COUNT(*)` against the column the job claims to have written.
 
 **Do NOT dedupe historical `*_snapshots` by `entity_id` when `scrape_run_id IS NULL`.**
-- Historical (pre-Phase-4) snapshot rows have `scrape_run_id = NULL` because staged CLI commands never opened a `scrape_runs` row. Looks like corruption; is not. `scraped_at TEXT DEFAULT CURRENT_TIMESTAMP` preserves per-row time identity.
+- Historical snapshot rows have `scrape_run_id = NULL` because staged CLI commands never opened a `scrape_runs` row. Looks like corruption; is not. `scraped_at TEXT DEFAULT CURRENT_TIMESTAMP` preserves per-row time identity.
 - Deduping by entity_id would collapse the time series. Always cluster by `scraped_at` date instead.
-- Post-Phase-4: this is moot for new writes (narrow tables always have run_id), but the archived `*_snapshots_v1_archive` retains the NULL rows.
+- The `*_snapshots` tables stopped growing 2026-04-23 (last write before Phase 3a deployment). New writes go to `*_metrics` / `*_events` which always have `scrape_run_id`. If Phase 4 retains any historical `*_snapshots` data, this dedup-rule still applies to those rows.
 
 **`_migrate()` as a dict keyed by table silently drops duplicate keys (session 21, 2026-04-20).**
 - Migrations 2, 3, 7 (early per-table column additions) and Migration 9/10 (anchors) both keyed on `posts` / `agents` / `submolts`. Later entries overwrote earlier ones; only the anchor block actually ran on fresh DBs. Production DBs had the early columns applied by earlier code generations so the drop was invisible there — until the test harness created a fresh DB and hit `table submolts has no column named creator_id`.
@@ -127,7 +127,7 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 
 **Long-running read query blocks all writers (pre-WAL).**
 - Ran `audit_snapshot_mutability.py` in parallel with `backfill_claimed_by.py` in tmux. Backfill's first `commit()` died with `sqlite3.OperationalError: database is locked`. Without WAL, a single long read holds a shared lock that blocks writers.
-- **Resolution (planned in Phase 3a):** `PRAGMA journal_mode=WAL` in `DatabaseManager.__init__`. Forward-safe, persistent. Until that lands: run heavy read audits and writers sequentially.
+- **Resolution:** `PRAGMA journal_mode=WAL` in `Database.__init__`. Deployed 2026-04-24 (session 23); confirmed via `PRAGMA journal_mode;` returning `wal` on VM DB.
 
 **Snapshot audits require composite (entity, scraped_at) indexes.**
 - `ORDER BY entity_col, scraped_at` on `*_snapshots` triggers a full external sort without an index that covers both columns. First audit hung 2+ h on agent_snapshots alone. After adding `idx_{table}_snap_entity_time` indexes, same audit ran in 23 s.

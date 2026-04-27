@@ -41,8 +41,10 @@ python -u -m src.cli comments --db data/raw/moltbook.db --detect-deletions --log
 # Weekly cron (Mon 02:00 UTC): incremental + comments + enrich + snapshots
 0 2 * * 1  cd ~/moltbook_scraper && bash scripts/weekly_scrape.sh
 
-# Monthly cron (1st 01:55 UTC — 5 min before weekly slot for 1st-Monday collisions)
-55 1 1 * *  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
+# Monthly cron (every Tue 01:55 UTC; script exits on non-first-Tuesdays)
+# First Tuesday lands after the Monday weekly, avoiding the 1st-Monday collision
+# class entirely. Subsequent Mondays during the monthly run skip via sentinel.
+55 1 * * 2  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
 
 # Daily disk monitor (08:00 UTC): emails if >80% on either disk
 0 8 * * *  cd ~/moltbook_scraper && bash scripts/disk_monitor.sh
@@ -136,13 +138,26 @@ After the Phase 3 redesign, the snapshot layer is **change-driven and narrow**, 
 
 ### Weekly / monthly cron coordination
 
-- Monthly cron runs at `55 1 1 * *` (5 minutes before weekly's Monday 02:00 slot) and writes `~/moltbook_scraper/.monthly_running` with a timestamp on start, deleted via `trap EXIT INT TERM`.
-- Weekly checks for the lock at start; skips with log line if present and <7 days old, proceeds with a warning otherwise (stale-lock recovery).
-- A given item is touched by monthly every 3 months (sharded by submolt first letter: A-H, I-P, Q-Z). Deletion detection has a ≤ 3-month lag for old content; items seen within 4 weeks are fully covered by weekly.
+- Monthly cron fires every Tuesday 01:55 UTC; `monthly_rescrape.sh` exits cleanly when day-of-month > 7. Net effect: monthly runs on the first Tuesday of each month, always after that week's Monday weekly. The `.monthly_running` sentinel is written at start and removed via `trap EXIT INT TERM`.
+- Weekly checks the sentinel at start; skips with a log line if present and <7 days old, proceeds with a warning otherwise (stale-lock recovery). The Mondays that fall during a 5–7 day monthly run skip cleanly because monthly is a superset.
+- Sharding by submolt first-letter (A-H, I-P, Q-Z) is a planned future change to keep each monthly run inside the 7-day window — see methodology log entry. **Not yet implemented as of 2026-04-27.**
 
 ### Legacy note
 
-Prior to Phase 4, `*_snapshots` tables contain the historical full-dump state (2026-03-11 through Phase 4 migration date). These will be archived as `*_snapshots_v1_archive` and surfaced through compatibility VIEWs during transition.
+`*_snapshots` tables contain the historical full-dump state from 2026-03-11 through the Apr 20 weekly snapshot stage (last write 2026-04-23 12:23 UTC). They have **stopped growing** as of the Apr 24 Phase 3a deployment — `create_snapshots()` no longer writes to them. Phase 4 (planned this week, post-Apr-27-weekly) will archive or drop them to reclaim ~30 GB inside the live DB.
+
+Row counts as of 2026-04-27: post_snapshots 11.2M, comment_snapshots 18.5M, agent_snapshots 866K, submolt_snapshots 100K, moderator_snapshots 92K.
+
+### Backup retention policy
+
+Disk budget on the 100 GB Hetzner volume:
+
+- **Live DB**: working copy. Post-Phase-4 target: ~14 GB.
+- **Latest weekly backup** (`moltbook-weekly-YYYY-MM-DD.db`): one retained, pruned at end of next weekly run. Defends against any single week's corruption / accidental delete.
+- **Latest monthly-post backup** (`moltbook-monthly-post-YYYY-MM-DD.db`): one retained, pruned at end of next monthly run. Long-term archival snapshot.
+- **No pre-monthly backup** — the latest weekly already provides a "before monthly" recovery point (≤ 7 days stale). Dropped 2026-04-27 (session 24) for disk-budget reasons; risk accepted.
+
+Steady state: live DB + 2 backups ≈ 3 × ~14 GB = ~42 GB. Peak during overlap window: ~56 GB.
 
 ### Snapshot monitoring (R1 — for new change-driven writer)
 
