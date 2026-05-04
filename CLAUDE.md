@@ -130,7 +130,7 @@ After the Phase 3 redesign, the snapshot layer is **change-driven and narrow**, 
 - Queries that joined `post_snapshots` / `comment_snapshots` for content must now read content from `posts` / `comments` directly. Content is preserved across the lifetime of the entity.
 - Queries that need vote trajectory read from `post_metrics` (only for posts seen within 4 weeks of creation) or use `upvotes` / `downvotes` on the live table for a single latest value.
 - Queries that need state transitions (was this post pinned in week X?) read from `post_events` / `agent_events` / etc.
-- Compatibility VIEWs named `*_snapshots` will be provided during Phase 4 to ease R migration; they will be retired after R code is updated.
+- The legacy `*_snapshots` tables were dropped in Phase 4 (2026-05-03, session 25). No compatibility VIEWs were created — `analysis/R/` did not depend on them under the Phase 3 design. If a one-off historical query is ever needed, restore from the cold-storage dump (`gunzip -c data/archive/legacy_snapshots_2026-04-27.sql.gz | sqlite3 restored.db`) into a separate file; do not load back into the live DB.
 
 ### Deletion-content preservation
 
@@ -142,22 +142,16 @@ After the Phase 3 redesign, the snapshot layer is **change-driven and narrow**, 
 - Weekly checks the sentinel at start; skips with a log line if present and <7 days old, proceeds with a warning otherwise (stale-lock recovery). The Mondays that fall during a 5–7 day monthly run skip cleanly because monthly is a superset.
 - Sharding by submolt first-letter (A-H, I-P, Q-Z) is a planned future change to keep each monthly run inside the 7-day window — see methodology log entry. **Not yet implemented as of 2026-04-27.**
 
-### Legacy note
-
-`*_snapshots` tables contain the historical full-dump state from 2026-03-11 through the Apr 20 weekly snapshot stage (last write 2026-04-23 12:23 UTC). They have **stopped growing** as of the Apr 24 Phase 3a deployment — `create_snapshots()` no longer writes to them. Phase 4 (planned this week, post-Apr-27-weekly) will archive or drop them to reclaim ~30 GB inside the live DB.
-
-Row counts as of 2026-04-27: post_snapshots 11.2M, comment_snapshots 18.5M, agent_snapshots 866K, submolt_snapshots 100K, moderator_snapshots 92K.
-
 ### Backup retention policy
 
-Disk budget on the 100 GB Hetzner volume:
+Disk budget on the 100 GB Hetzner volume (post-Phase-4 actuals as of 2026-05-03):
 
-- **Live DB**: working copy. Post-Phase-4 target: ~14 GB.
-- **Latest weekly backup** (`moltbook-weekly-YYYY-MM-DD.db`): one retained, pruned at end of next weekly run. Defends against any single week's corruption / accidental delete.
-- **Latest monthly-post backup** (`moltbook-monthly-post-YYYY-MM-DD.db`): one retained, pruned at end of next monthly run. Long-term archival snapshot.
-- **No pre-monthly backup** — the latest weekly already provides a "before monthly" recovery point (≤ 7 days stale). Dropped 2026-04-27 (session 24) for disk-budget reasons; risk accepted.
+- **Live DB**: ~6.2 GB working copy.
+- **Latest weekly backup** (`moltbook-weekly-YYYY-MM-DD.db`): one retained, pruned at end of next weekly run. ~6–7 GB once Apr 27's pre-Phase-4 backup is replaced by the May 4 weekly's.
+- **Latest monthly-post backup** (`moltbook-monthly-post-YYYY-MM-DD.db`): one retained, pruned at end of next monthly run. ~6–7 GB.
+- **No pre-monthly backup** — the latest weekly already provides a "before monthly" recovery point (≤ 7 days stale). Dropped 2026-04-27 (session 24); risk accepted.
 
-Steady state: live DB + 2 backups ≈ 3 × ~14 GB = ~42 GB. Peak during overlap window: ~56 GB.
+Steady state: live DB + 2 backups ≈ ~21 GB used / ~78 GB free. Plenty of runway; no further volume expansion expected.
 
 ### Snapshot monitoring (R1 — for new change-driven writer)
 

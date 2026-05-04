@@ -1,208 +1,123 @@
 # Claude Handover — Moltbook Scraper
 
-**Last verified against code + VM**: 2026-04-27, session 24.
+**Last verified against code + VM**: 2026-05-04, session 25.
 
-> **Provenance convention.** Each claim below is tagged:
-> - `[verified]` — checked against current code or VM state in the most recent session
-> - `[design]` — describes intent, not yet confirmed against runtime
-> - `[planned]` — agreed direction, no implementation yet
->
-> When updating this file: re-verify or re-tag every claim. Do not copy a `[verified]` tag from a prior version without re-checking.
+> Provenance: claims tagged `[verified]` were checked against current state in this session; `[planned]` is agreed direction without implementation. Re-tag rather than copy-forward.
 
 ---
 
-## Orientation: where things stand
+## Current state
 
-[verified 2026-04-27]
+[verified 2026-05-04]
 
-- **Apr 27 weekly is currently running.** PID 920465, started 02:00 UTC, comments stage in progress (~80% through at session start). ETA SUCCESS: ~Apr 30 ~15:00 UTC, ~85 h total because the widened enrich predicate matched the full ~175K backlog from the never-committed Apr 20 enrich. **This is the last 80h+ weekly.** Subsequent weeklies revert to ~16h.
-- **Phase 3a is fully deployed.** `src/scraper.py:create_snapshots()` writes only to narrow `*_metrics` / `*_events` tables. **There is no longer a "legacy writer running alongside"** — that statement in the prior handover was a misread of design intent vs. shipped code. The `*_snapshots` tables (11.2M post + 18.5M comment + 866K agent + 100K submolt + 92K moderator rows) stopped growing at the Apr 20 weekly snapshot stage (last write 2026-04-23 12:23 UTC).
-- **Volume expanded 80 → 100 GB on 2026-04-27.** `resize2fs` applied online during the running scrape; no impact. Currently 84 % used / 16 GB free during the run.
-- **Backup retention rewritten** (this session): pre-monthly backup dropped; only `latest weekly` + `latest monthly-post` retained.
-- **Monthly cron rescheduled** (this session): now first Tuesday of month (`55 1 * * 2` + day ≤ 7 guard). May 2026 monthly will fire May 5, after May 4 weekly.
-- **Local repo**: `main`, working tree clean except for this session's edits. 5 commits ahead of origin from session 23 (`311b0d1` → `40b47e9`); push when convenient.
-- **VM `~/moltbook_scraper`** is not a git checkout — code ships via `scp` + `dos2unix`. Verify push state by reading file contents, not `git log`.
+- **Phase 4 complete (2026-05-03, session 25).** Live DB shrunk 29 GB → **6.2 GB** after dropping 5 legacy `*_snapshots` tables. ~30.75 M rows preserved as compressed cold-storage dump on local at `data/archive/legacy_snapshots_2026-04-27.sql.gz` (6.2 GB, SHA256 `720c3994ea60603dae19342b37d7c0c2a576e5ceefcd9f90c4f2daa3625ed817`). `snapshot_mutability_evidence` (audit summary, 30 rows) preserved.
+- **May 4 weekly is currently running.** Cron fired 02:00 UTC; comments stage in progress at session-end (~6 h in). First weekly under the new normal — small enrich pool (predicted 7,537 agents) and incremental snapshot writer (no first-run baseline). Expected runtime ~16 h, ETA SUCCESS ~2026-05-04 ~18:00 UTC.
+- **Phase 3a writer empirically verified.** post_metrics 334,421 = posts ≤ 28 d (Δ=39 vs direct count); agent_metrics 177,058 = all agents; submolt_metrics 20,840; moderator_events 20,010 (one-time baseline); post/agent/submolt_events 0 (anchor design works).
+- **`claimed_by` backfill complete.** 240 / 175,311 = 0.14 % NULL — within ≤ 2 K acceptable threshold; the 240 ≈ the 238 transient enrich errors.
+- **Volume: 60 GB free (37 % used)** as of session-25 end. Will jump to ~83 GB once May 4 weekly prunes the Apr 27 backup (still 29 GB, pre-Phase-4 era). Steady-state from there: ~21 GB used / ~78 GB free.
+- **Cron**: weekly Mon 02:00, monthly Tue 01:55 (with first-Tuesday-of-month guard inside script), disk monitor 08:00 — all confirmed in place.
+- **Local repo**: `main`, working tree has session-25 documentation edits uncommitted (8 files); plus pre-existing 5 commits ahead of origin from sessions 23 + 24.
 
 ## Spot-check on return
-
-Run this before trusting anything below; output tells you which Block applies.
 
 ```bash
 date -u
 ssh vm 'bash ~/moltbook_scraper/scripts/status.sh'
-ssh vm 'ls -1 ~/moltbook_scraper/logs/weekly-*.log | tail -3'
-ssh vm 'ls -1 ~/moltbook_scraper/logs/monthly-*.log | tail -3'
-ssh vm 'ls -lh /mnt/HC_Volume_104999576/moltbook_data/backups/'
+ssh vm 'ls -1t ~/moltbook_scraper/logs/weekly-*.log | head -3'
+ssh vm 'ls -lh /mnt/HC_Volume_104999576/moltbook_data/moltbook.db /mnt/HC_Volume_104999576/moltbook_data/backups/'
 ssh vm 'df -h /mnt/HC_Volume_104999576'
 ssh vm 'crontab -l | grep -E "weekly|monthly"'
 ```
 
-**Match against**:
-- `df` should show **100 GB** total (post-resize). If 80 GB, the resize was rolled back somehow — investigate.
-- Crontab monthly line should be `55 1 * * 2 ...`. If still `55 1 1 * * ...`, the cron update didn't get applied — see Block C.
-- Backup directory should contain at most: 1× `moltbook-weekly-*.db` and 1× `moltbook-monthly-post-*.db`. **There should be NO `moltbook-monthly-pre-*.db`** under the new policy.
-- `weekly-2026-04-27.log` exists. Check for `SUCCESS` or `FAILED` to know which Block applies.
+Match against:
+- DB file should be ~6–7 GB (post-Phase-4). If 29 GB, something is very wrong.
+- Volume free should be ≥ 60 GB; ~83 GB after May 4 weekly completes its prune.
+- Backups dir post-May-4-weekly: `moltbook-weekly-2026-05-04.db` (~6–7 GB), Apr 27 backup pruned. If both still present, the prune step failed.
+- Crontab monthly = `55 1 * * 2`. Weekly = `0 2 * * 1`.
+- status.sh "DB size: 0" is a known cosmetic bug (du-on-symlink); ignore.
+- status.sh "N errors" line is a known cosmetic bug (`grep -c "error"` matches `0 errors)` in progress lines); diagnose only via `grep -cE "Exception|Traceback|ENOSPC|OperationalError"`.
 
 ---
 
-## Block A — Verify Apr 27 weekly outcome
+## Next actions (state-conditional)
 
-**Precondition**: `grep -q SUCCESS ~/moltbook_scraper/logs/weekly-2026-04-27.log` returns a match (i.e., the weekly has finished). If still running or no SUCCESS marker, do not proceed.
+### If May 4 weekly is still running
 
-This is the first weekly that exercises the Apr 24 push (Phase 3a writer + enrich commit fix + WAL + sentinel) end-to-end on production data. We need to confirm it actually did what it was supposed to before doing Phase 4.
+Nothing operational. Wait. Re-run spot-check on next visit.
 
-### A.1 Enrich commit fix landed
+### If May 4 weekly has completed (SUCCESS)
 
-```bash
-ssh vm 'sqlite3 ~/moltbook_scraper/data/raw/moltbook.db "
-  SELECT COUNT(*) FROM agents WHERE is_claimed=1 AND claimed_by IS NULL
-"'
-```
+This is the first weekly under the new steady-state, so it deserves a one-time post-mortem to confirm forecasts:
 
-- **Expected**: ≤ 200 (residual transient errors)
-- **Acceptable**: ≤ 2,000
-- **Investigate**: > 2,000 (commit fix may not have applied as expected; do not run Phase 4 until resolved)
+1. **Enrich runtime**: should be ~10–16 h total (was 81.5 h on Apr 27). `grep "DONE: enrich" logs/weekly-2026-05-04.log` and confirm the elapsed.
+2. **Enrich pool size**: was 175 K backfill on Apr 27. Confirm pool was ~7,537 (matches the Sun May 3 prediction). `grep -E "Found .* unenriched" logs/scrape-enrich.log`.
+3. **`claimed_by` gate**: should still be ~240–500 (some normal turnover from new-agent stubs that fail enrich). `sqlite3 .. "SELECT COUNT(*) FROM agents WHERE is_claimed=1 AND claimed_by IS NULL"`.
+4. **Snapshot stage growth**: should be MUCH smaller than Apr 27 baseline. `tail logs/scrape-snapshots.log` and check the R1 monitoring lines:
+   - `post_metrics inserted_metrics`: expect ≤ 5 K (only entities whose vote/comment counts moved). Apr 27 was 334 K (first-run, every eligible post).
+   - `agent_metrics inserted_metrics`: expect ≤ 10 K. Apr 27 was 177 K.
+   - `submolt_metrics inserted_metrics`: expect ≤ 1 K. Apr 27 was 21 K.
+   - `moderator_events inserted_events`: expect ≤ 50 (only role/membership flips). Apr 27 was 20 K (baseline).
+   - `post/agent/submolt_events inserted_events`: expect single-digits to low-hundreds (only state flips).
+5. **Backup prune**: confirm `moltbook-weekly-2026-04-27.db` is gone and only `moltbook-weekly-2026-05-04.db` (~6–7 GB) remains.
+6. **Disk**: `df -h` should show ~83 GB free.
 
-### A.2 Phase 3a narrow writer fired correctly
+If all of those pass, update this handover to `[verified]` for the new steady state and move on.
 
-```bash
-ssh vm 'for t in post_metrics agent_metrics submolt_metrics moderator_events post_events agent_events submolt_events; do
-  echo "$t: $(sqlite3 ~/moltbook_scraper/data/raw/moltbook.db "SELECT COUNT(*) FROM $t")"
-done'
-```
+### If May 4 weekly FAILED
 
-- **Expected** (one-time first-run baseline, per dryrun on Apr 8 11 GB DB):
-  - `post_metrics`: ~22,000 (only posts ≤ 4 weeks old)
-  - `agent_metrics`: ~175,000 (one-time first-run for all agents)
-  - `submolt_metrics`: ~20,000 (one-time first-run for all submolts)
-  - `moderator_events`: ~19,655 (one-time baseline "added")
-  - `post_events`, `agent_events`, `submolt_events`: 0 (initial state captured in `*_first` anchors, not events)
-- **Investigate**: any value off by >2× from expected. Cross-check `tail logs/scrape-snapshots.log` for R1 monitoring lines (`entities_scanned=N, inserted_metrics=M, inserted_events=E`).
-
-### A.3 Legacy `*_snapshots` did not grow
-
-```bash
-ssh vm 'sqlite3 ~/moltbook_scraper/data/raw/moltbook.db "
-  SELECT MAX(scrape_run_id) FROM post_snapshots;
-  SELECT MAX(scrape_run_id) FROM comment_snapshots;
-"'
-```
-
-- **Expected**: both = 1 (the Apr 20 weekly's `scrape_run_id`). Apr 27 weekly should not have written any rows.
-- **Investigate**: max = 2 → `create_snapshots()` somehow still writing legacy rows. Means the deployed code differs from local. Re-read VM `src/scraper.py:_snapshot_*` functions.
-
-If A.1, A.2, A.3 all pass: proceed to Block B.
+Read `tail -200 logs/weekly-2026-05-04.log`. Likely culprits given the change set:
+- `enrich_agents` commit logic regression (now-known-good code, but worth a sanity check)
+- snapshot stage error if the writer hits unexpected data (e.g. NULL anchors that should never be NULL)
+- ENOSPC: should not happen with 60 GB free; if it does, something else is wrong
 
 ---
 
-## Block B — Phase 4: reclaim ~30 GB from legacy `*_snapshots`
+## May 5 monthly — first attempt under rescheduled cron
 
-**Precondition**: Block A passed AND no scrape currently running (`ps -ef | grep -v grep | grep -E "weekly_scrape|monthly_rescrape"` returns nothing).
+[planned for 2026-05-05]
 
-**Goal**: shrink live DB from ~29 GB to ~14 GB by removing the 30 M historical legacy snapshot rows. New code does not write to these tables; they are pure historical residue.
+Monthly cron now `55 1 * * 2`; first-Tuesday guard inside script. **Tue May 5 is the first Tuesday of May → monthly fires.** It runs *after* whatever happens with the May 4 weekly.
 
-### Decision needed before executing
+Two things to verify when convenient after May 5:
+1. `monthly-2026-05-05.log` exists and progresses past the "Backing up database" line — that's where Apr 1 monthly silently died (no monthly run has ever completed in project history; see Known issues).
+2. If it completes: takes ~5–7 days; `monthly-post-2026-05-05.db` backup created; Mondays during the run skip cleanly via `.monthly_running` sentinel.
 
-Three sub-options, decide first:
-
-1. **Drop entirely** — easiest. Loses 30 GB of historical snapshot data. Justification: the Phase 2 mutability audit (`tables/snapshot_mutability_audit_2026-04-14.csv`) found 0.0000 % change on post/comment snapshots → repeated rows of the same content. agent/submolt/moderator snapshots have some signal but limited.
-2. **Offload, then drop** — `sqlite3 .dump > legacy_snapshots_v1.sql.gz`, scp to local or storage box, drop tables in DB. Preserves data off-volume.
-3. **Selective**: drop only `post_snapshots` and `comment_snapshots` (the ones with 0.0000 % change). Keep agent/submolt/moderator snapshots in the DB.
-
-[planned] Default recommendation if user has no preference: option 3 (selective drop). Saves ~25 GB while preserving the agent/submolt/moderator history that has actual signal.
-
-### Execution outline (assuming option 3)
-
-Do NOT execute until decision confirmed and scrape is idle. Sketch only:
-
-1. Disable cron temporarily: `ssh vm 'crontab -l > /tmp/cron.bak; crontab -r'`
-2. Acquire DB lock: just verify no scrape running via PID check
-3. `BEGIN; DROP TABLE post_snapshots; DROP TABLE comment_snapshots; COMMIT;`
-4. `VACUUM` (may take several hours on a 29 GB DB; runs offline)
-5. Verify: `du -h moltbook.db` should now show ~14 GB
-6. Re-enable cron: `ssh vm 'crontab /tmp/cron.bak'`
-7. Update `claude_methodology_log.md` with the actual date, sub-option chosen, and resulting DB size
-
-### Risk register
-
-- VACUUM rewrites the entire DB; needs ~live-DB-size of free space mid-run. With 16 GB free post-resize and DB at 29 GB, **VACUUM will fail unless we drop the tables FIRST and `pragma incremental_vacuum` afterwards** — or move the DB to a temporary location with more free space. Verify free-space math before pulling the trigger.
-- Compatibility: any R analysis script that reads `post_snapshots` or `comment_snapshots` will break. Audit `analysis/R/` first; nothing in there should depend on these tables under the Phase 3 design (R should be reading `posts.content` directly, since posts are immutable).
-
----
-
-## Block C — Verify cron + script changes from session 24 actually landed on VM
-
-**Precondition**: this Block's edits may have been completed in session 24 (check session log) or may still be pending. Idempotent — safe to re-run.
-
-Session 24 made local edits to `scripts/monthly_rescrape.sh` and (per plan) updated the VM crontab. Verify the VM matches.
-
-### C.1 monthly_rescrape.sh on VM matches local
-
-```bash
-ssh vm 'grep -E "DAY_OF_MONTH|monthly-pre|first Tuesday" ~/moltbook_scraper/scripts/monthly_rescrape.sh | head -10'
-```
-
-Expected:
-- One line referencing `DAY_OF_MONTH=$(date -u +%-d)` (the Tuesday guard)
-- One line of comment about "first Tuesday"
-- **No active line** creating `monthly-pre-*.db` (only a comment block explaining its absence)
-
-If output is missing these markers: scp the local file:
-```bash
-scp scripts/monthly_rescrape.sh vm:~/moltbook_scraper/scripts/
-ssh vm 'dos2unix ~/moltbook_scraper/scripts/monthly_rescrape.sh'
-ssh vm 'bash -n ~/moltbook_scraper/scripts/monthly_rescrape.sh'   # syntax check
-```
-
-### C.2 Crontab line matches new schedule
-
-```bash
-ssh vm 'crontab -l | grep monthly'
-```
-
-Expected: `55 1 * * 2  cd /root/moltbook_scraper && bash scripts/monthly_rescrape.sh ...`
-
-If still `55 1 1 * * ...`: update via:
-```bash
-ssh vm 'crontab -l > /tmp/cron.tmp; sed -i "s|55 1 1 \\* \\*|55 1 * * 2|" /tmp/cron.tmp; crontab /tmp/cron.tmp; crontab -l'
-```
-
-### C.3 No leftover monthly-pre backups on volume
-
-```bash
-ssh vm 'ls /mnt/HC_Volume_104999576/moltbook_data/backups/moltbook-monthly-pre-*.db 2>/dev/null'
-```
-
-Expected: empty output (file not found). If any exist (none should, per session 24 spot-check), they are safe to `rm` to free disk.
+Schedule a follow-up agent for ~2026-05-12 to verify completion (or diagnose silent death if it recurs).
 
 ---
 
 ## Known issues / open threads
 
-### Apr 1 monthly never completed
+### Apr 1 monthly silent-death — recurrence test pending
 
-[verified 2026-04-27] `logs/monthly-2026-04-01.log` is 4 lines: header + "Backing up database (pre-scrape)..." then nothing. No SUCCESS, no FAILED, and no `monthly-pre-2026-04-01.db` exists in `backups/`. As far as available evidence, **no monthly run has ever completed in the project's history**. Cron fired Apr 1 02:00 UTC and the script died silently somewhere during `sqlite3 .backup`.
+[verified 2026-04-27] `monthly-2026-04-01.log` is 4 lines and stops at "Backing up database (pre-scrape)...". No SUCCESS, no FAILED. As far as evidence on disk, no monthly run has ever completed. Likely OOM during `sqlite3 .backup` on the at-the-time 22 GB live DB on the cramped root disk. With Phase 4's 6.2 GB DB and 60 GB free volume, this should not recur — but the May 5 monthly is the actual test.
 
-To diagnose: check `~/moltbook_scraper/logs/cron.log` around 2026-04-01, `dmesg | grep -i kill` for OOM, and `/var/log/syslog` if retained. Likely culprits: OOM during `.backup` (the live DB at the time was ~22 GB; `.backup` opens a transaction holding pages in memory), disk-write failure on the at-the-time-cramped root disk, or an interrupted SSH session that took the script with it.
-
-This becomes immediately relevant if May 5 monthly also dies silently. Do not assume the monthly will run successfully just because the cron fires.
+If May 5 also dies silently: `~/moltbook_scraper/logs/cron.log` around 2026-05-05, `dmesg | grep -i kill`, `/var/log/syslog`.
 
 ### Pytest hang
 
 [verified 2026-04-21] `pytest` without path filter hangs on `test_fetch_all_posts_paginates_until_no_more` and orphans ~50 GB RAM. Always scope to specific test files.
 
+### Sharding by submolt first-letter
+
+[planned, not implemented] Methodology log entry from 2026-04-20. Re-evaluate after first successful post-Phase-4 monthly to see if the un-sharded run still fits inside the 7-day window with the smaller live DB.
+
+### status.sh cosmetic bugs
+
+Two pre-existing display bugs surface every session-startup:
+- `DB size: 0` — `du` on a symlinked path. Real size from `ls -lh`.
+- `N errors` — `grep -c "error"` matches `"0 errors)"` in progress lines. Real error count from `grep -cE "Exception|Traceback|ENOSPC|OperationalError"`.
+
+Both are 2–5 line fixes to `scripts/status.sh`. Low priority but worth doing — they cost cognitive overhead every session.
+
 ---
 
 ## Resuming after absence
 
-1. Run §Spot-check block at top.
-2. Decide which Block applies based on output:
-   - Apr 27 weekly still running → wait, do nothing operational
-   - Apr 27 weekly SUCCESS → Block A
-   - Block A passed → Block B
-   - Crontab line is wrong / scripts mismatched → Block C (do this in parallel with anything else)
-3. Read `CLAUDE/session_logs/2026_04_27_session_log.md` for the full debugging trace and decision rationale of session 24.
-4. After completing any Block, update this handover and methodology log accordingly.
+1. Run §Spot-check above.
+2. Decide which of the May 4 weekly state branches applies; act accordingly.
+3. If returning after 2026-05-12 and no monthly post-mortem exists: check May 5 monthly status (see "May 5 monthly" section above).
+4. Read `CLAUDE/session_logs/2026_05_03_session_log.md` for the full Phase 4 execution trace.
 
 ## Work laptop
 

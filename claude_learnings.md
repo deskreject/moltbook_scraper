@@ -137,6 +137,17 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - If the command errors quickly, the tmux window vanishes and you lose the traceback. First `backfill_claimed_by` attempt looked like it "disappeared" — actually died on SQLite lock, but stderr was gone.
 - **Resolution:** Wrap commands with `bash -c "... ; exec bash"` so the shell stays alive after the process exits, and tee stderr to a log file.
 
+**DROP TABLE on large tables in WAL mode is NOT instant and consumes transient disk proportional to data being dropped (session 25, 2026-05-03).**
+- Phase 4 drop of all 5 legacy `*_snapshots` (post 8.5 GB, comment 10.6 GB, agent 150 MB, submolt 21 MB, moderator 4 MB ≈ 22 GB total + indexes) inside a single `BEGIN; DROP …; COMMIT;` transaction took **28 minutes**, not seconds. WAL grew to **17 GB** during the transaction (page-frees being journaled), pushing volume free space from 32 GB down to **15 GB at peak**. We survived but had no margin.
+- Auto-checkpoint on COMMIT cleaned the WAL fully; explicit `PRAGMA wal_checkpoint(TRUNCATE)` afterwards returned `0|0|0` (nothing to do).
+- **General lesson:** before any large DROP under WAL, ensure free disk ≥ size of data being dropped. If headroom is thin, drop tables one at a time in separate transactions so the WAL can checkpoint between drops, or temporarily disable WAL (`PRAGMA journal_mode=DELETE`) for the drop and re-enable after — both reduce peak transient disk pressure. Same logic applies to bulk DELETE.
+- **Did NOT need:** explicit `wal_checkpoint(TRUNCATE)` between DROP and VACUUM — auto-checkpoint already cleaned WAL. Extra step is harmless but redundant.
+
+**Dryrun expectation numbers must be normalized to the DB's MAX(created_at), not "now" (session 25, 2026-05-03).**
+- The Apr 8 dryrun computed `post_metrics` first-run baseline using `julianday('now') - julianday(created_at) <= 28` against an Apr 8 frozen DB. Run-time `now` was Apr 24, so the 4-week window only intersected ~12 days of actual posts in the DB → 22,184 rows. The handover then propagated "expected ~22 K" as the baseline for the Apr 27 production run, which actually saw **334,421 rows** (= posts ≤ 28 days old as of Apr 30, against a live DB with 19 days of newer posts).
+- The Apr 27 number is correct (verified Δ=39 against direct count); the dryrun expectation was effectively meaningless because the DB it ran on was older than the 4-week window.
+- **Resolution:** future dryrun expectations on a frozen-snapshot DB should compute the cutoff against `(SELECT MAX(created_at) FROM posts)` of that DB, not against `'now'`. Otherwise the predicted baseline is an apples-to-oranges artifact.
+
 ---
 
 ## Process & Workflow
