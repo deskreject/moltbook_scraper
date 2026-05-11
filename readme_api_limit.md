@@ -131,5 +131,5 @@ The DB's UPSERT design means results can be rsync'd together safely.
 ## Open Questions
 
 1. What is the exact infrastructure-level rate limit (requests/min per IP)? We know it's above 25/min (sequential works) and below 540/min (triggered the block). Likely in the 60-200/min range.
-2. Does the infrastructure limit have a separate cooldown period, or is it the same 1-minute window? Evidence suggests a longer window (15+ minutes observed).
+2. Does the infrastructure limit have a separate cooldown period, or is it the same 1-minute window? Evidence suggests a longer window AND that the window scales with abuse magnitude. **2026-03 (session 8): ~10 h of 540 req/min bursts → ≥ 15 min cooldown.** **2026-05-08 (session 26): 3 days of continuous sustained traffic → ≥ 32 min cooldown still active when re-probed after SIGTERM.** Mapping the actual long-window after a multi-day run is an open task — see `CLAUDE/session_logs/2026_05_08_session_log.md` "Open threads".
 3. Is there a per-IP daily/hourly quota in addition to the per-minute limit?

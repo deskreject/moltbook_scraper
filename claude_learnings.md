@@ -20,6 +20,16 @@ Errors, failures, choke points, and dead ends encountered across sessions. Purpo
 - Source says 100/min, production is 60/min (confirmed via `X-RateLimit-Limit: 60` header).
 - **Resolution:** Never trust source code for rate limits; check live headers.
 
+**`fetch_comments_only` `except Exception: return []` masked rate-limit-induced data corruption for ~3 days (session 26, 2026-05-08).**
+- The silent except was flagged in `readme_api_limit.md` line 85 back in session 8 (March 2026) and never fixed. May 5 monthly tripped the infra-layer per-IP rate limit after 3 days of continuous traffic, every 429 became `[]`, and `_detect_deleted_comments` tombstoned 4,126 comments + 6,428 posts that were not actually deleted.
+- The progress log read `0 errors` throughout because no exception ever propagates above `fetch_comments_only`. **Do not trust the `errors=N` field on the comments stage as a health signal.**
+- **Resolution before re-enabling monthly:** `fetch_comments_only` must distinguish `RateLimitError` from "empty result"; `_detect_deleted_comments` must refuse to mark anything when the fetch was rate-limited.
+- Full diagnostic trace (signature checklist for recognizing recurrence vs. something new, kill order, damage quantification, rate-limit probes) in `CLAUDE/session_logs/2026_05_08_session_log.md`. Current state and Monday-resume plan in `claude_handover.md`.
+
+**Infra-layer per-IP rate-limit cooldown scales with abuse magnitude (session 26, 2026-05-08).**
+- Previously documented in `readme_api_limit.md` as "15+ minutes" (session 8, March 2026, after ~10 h of 540 req/min bursts). After 3 days of sustained traffic, observed cooldown ≥ 32 min — still 429 to fresh probes that long after stopping. Window evidently scales with how long/hard the abuse ran.
+- **Resolution:** never run a single-IP scrape longer than ~1 day continuously. Implement planned submolt-letter sharding before re-enabling monthly, or split across IPs.
+
 ---
 
 ## Infrastructure & Deployment
