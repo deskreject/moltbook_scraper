@@ -4,7 +4,23 @@
 
 ---
 
-## Confirmed Facts (verified against live API)
+## ⚠️ REGIME CHANGE observed 2026-05-29 (session 30) — facts below are pre-change, see this block first
+
+The live API now returns a **tiered, multi-window** rate-limit scheme behind **AWS CloudFront**, not the single-header `X-RateLimit-Limit: 60` per-token model documented below (confirmed 2026-03-06). This is a provider-side change (likely a re-platform). Full header set captured 2026-05-29 — **identical for authed and anon requests**:
+
+```
+x-ratelimit-limit-short:  30      reset 1        x-ratelimit-remaining-short
+x-ratelimit-limit-medium: 600     reset 60       x-ratelimit-remaining-medium
+x-ratelimit-limit-long:   10000   reset 300      x-ratelimit-remaining-long
+x-ratelimit-limit:        200     reset <epoch>  (legacy/unsuffixed; was 60 on 2026-03-06)
+via: 1.1 ...cloudfront.net (CloudFront);  x-amz-cf-pop: FRA60-P12
+```
+
+What changed vs the 2026-03 baseline: (a) single `X-RateLimit-Limit:60` → tiered `short/medium/long` + unsuffixed `200`; (b) infra layer Cloudflare/nginx → **CloudFront**; (c) anon==authed limits + shared reset epoch ⇒ likely **IP/global bucketing, not per-token** — so a second token may no longer bypass the app-layer limit (revisit block-A T1-T5 assumptions). Sequential ~25/min is still well under every tier, so **no immediate breakage**. Open: when did it change, and is it Meta-acquisition-related? Investigate via `cli docs` diff, upstream/observatory `src/middleware/rateLimit.js` diff, web search. NB: `client.py:_request` uses fixed exponential backoff and parses **none** of these headers — make it header-aware (`Retry-After`, `*-remaining-*`) as part of the block-A safeguard. See `CLAUDE/session_logs/2026_05_29_session_log.md` §2.
+
+---
+
+## Confirmed Facts (verified against live API) — PRE-2026-05-29 REGIME
 
 ### Application-level rate limit
 - **60 req/min per API token** (confirmed via `X-RateLimit-Limit: 60` header on 2026-03-06)

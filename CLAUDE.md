@@ -1,5 +1,8 @@
 # CLAUDE.md - Project Guide for Moltbook Scraper
 
+wherever possible, this file should be kept between 100-150 lines (maximum 200)
+if this file goes beyond, recommend which lines should be removed or included in other .md files
+
 ## Project Overview
 
 Academic research project for scraping and econometrically analyzing Moltbook, an AI-agent-only social network. The project produces a working paper analyzing the social graph structure, conversation dynamics, and content patterns of AI agent interactions.
@@ -38,7 +41,10 @@ python -u -m src.cli comments --db data/raw/moltbook.db --detect-deletions --log
 ### VM Automation (Hetzner)
 
 ```bash
-# Weekly cron (Mon 02:00 UTC): incremental + comments + enrich + snapshots
+# Weekly cron (Mon 02:00 UTC): 6 stages — incremental, submolts, comments, moderators, enrich, snapshots
+# Steady-state runtime ~20 h (post-Phase-4 corpus; e.g. May 4: 19.5 h, May 25: 20.6 h). NOT 8-10 h.
+# moderators is the swing stage: ~11-12 h normally but can spike to ~30 h+ under API rate-limit/backoff
+# pressure (May 18: 31 h). comments scales with the missing-comment backlog and is back-pressure sensitive.
 0 2 * * 1  cd ~/moltbook_scraper && bash scripts/weekly_scrape.sh
 
 # Monthly cron (every Tue 01:55 UTC; script exits on non-first-Tuesdays)
@@ -102,7 +108,8 @@ from the project directory
 
 - **session memory** save what you did and what was learned in brief, but parsimonious way to the session logs in the form of "yyyy_mm_dd_session_log".
 - **handover document** outline next steps to the file handover.md in a way that can be complemented by the session logs. I.e. reference in which session log the relevant further information to understand the next steps can be
-- **Claude.md** should be updated with any key decisions made about choice of methods, data processing and anything else of relevance for reproducibility
+- **Claude.md** should contain only rules about how Claude should behave and any key, timeless information. No superfluous detail that could be contained in other .md files
+- **claude_methodology_log** should contain any information on processes or decisions made that need to be documented for scientific reproducability. in a table format
 - **learnings.md** should document errors, failures, choke points or dead ends that were encountered and how they were solved including things that were tried and didn't work or were refused by me with the associated reason. The purpose is to stop pursuing directions that were tried in the past.
 - **achive file**  It should be a archive.md file with condensed entries by date of things that were removed from handover, Claude.md and learning.md that are no longer relevant for each session but that offer a very parsimonious bread crumb trail. 
 
