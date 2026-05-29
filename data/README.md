@@ -2,7 +2,7 @@
 
 Reference for the SQLite database at `data/raw/moltbook.db`. All tables are created via `CREATE TABLE IF NOT EXISTS` in `src/database.py`. This file documents structure only — see `CLAUDE.md` for scrape commands, rate limits, and operational notes.
 
-**Write behaviour**: all writes use UPSERT (`ON CONFLICT DO UPDATE SET`). Re-running any stage updates existing rows in place and never deletes data. `*_metrics`, `*_events`, and legacy `*_snapshots` are append-only. Re-running after a failure is safe.
+**Write behaviour**: all writes use UPSERT (`ON CONFLICT DO UPDATE SET`). Re-running any stage updates existing rows in place and never deletes data. `*_metrics` and `*_events` are append-only (change-driven). Re-running after a failure is safe.
 
 ## Live tables
 
@@ -144,10 +144,11 @@ Change-driven inserts. One row per entity per scrape run, **only when the counte
 
 | Table | Counters | Cutoff |
 |-------|----------|--------|
-| post_metrics | upvotes, downvotes, comment_count, hot_score | 4 weeks after `posts.created_at` |
-| agent_metrics | karma, follower_count, following_count, posts_count, comments_count | none |
-| comment_metrics | upvotes, downvotes | none (usually empty) |
+| post_metrics | upvotes, downvotes, comment_count | 4 weeks after `posts.created_at` |
+| agent_metrics | karma, follower_count, following_count | none |
 | submolt_metrics | subscriber_count | none |
+
+(No `comment_metrics` table — comment counters are not panelled. `hot_score` is captured once as the `posts.hot_score_first` live-table anchor, not in `post_metrics`. Verified against schema 2026-05-29, session 30.)
 
 Query pattern for "karma trajectory of agent X":
 `SELECT scraped_at, karma FROM agent_metrics WHERE agent_name = 'X' ORDER BY scraped_at`.
@@ -156,18 +157,20 @@ Query pattern for "karma trajectory of agent X":
 
 One row per transition of a boolean or enum. Very sparse. First observation is captured in the Layer-1 `_first` anchor — events are only emitted for *subsequent* transitions.
 
-| Table | Transitions |
+| Table | Transitions tracked by the writer |
 |-------|-------------|
-| post_events | is_pinned, is_locked, is_deleted, is_spam |
-| agent_events | is_claimed, is_verified, deleted_at → non-NULL |
-| submolt_events | verification status, private/public |
-| moderator_events | role added / removed / changed |
+| post_events | is_pinned, is_locked, is_deleted, is_spam, verification_status |
+| agent_events | is_claimed (only) |
+| submolt_events | none — table exists but `_snapshot_submolts` writes no events |
+| moderator_events | added / role_changed / removed |
 
-First post-migration snapshot emits a ~19,655-row moderator-events baseline (one "added" per existing pair). Post/agent/submolt events are 0 on first run.
+First post-migration snapshot emits a ~19,655-row moderator-events baseline (one "added" per existing pair). Post/agent events are 0 on first run.
 
-### Layer 4 — Legacy `*_snapshots` (retiring in Phase 4)
+**Caveat (session 30):** `post_events.is_spam` has 286k `0→1` rows from run 4 (2026-05-08 monthly snapshot) — an anchor catch-up artifact, not real-time flaggings; **exclude from analysis** (see methodology log 2026-05-29). `agent_events` is empty (is_claimed near-static; 1,771 agents have a NULL anchor and cannot emit). Detail: session-30 log §4.
 
-Historical full-dump rows (one per entity per weekly run) from 2026-03-11 through the Phase 4 migration date. Will be renamed to `*_snapshots_v1_archive`; compatibility VIEWs named `*_snapshots` bridge existing R code during transition.
+### Layer 4 — Legacy `*_snapshots` (DROPPED in Phase 4, 2026-05-03)
+
+Historical full-dump rows (one per entity per weekly run) from 2026-03-11. **Dropped 2026-05-03 (session 25)** — no compatibility VIEWs were created (`analysis/R/` did not depend on them under the Phase 3 design). ~30.75 M rows preserved as a cold-storage dump at `data/archive/legacy_snapshots_2026-04-27.sql.gz`; if ever needed, restore into a *separate* file (`gunzip -c … | sqlite3 restored.db`), never into the live DB. See methodology log (2026-05-03) + session 25 log.
 
 ### Row-shape summary
 
@@ -176,7 +179,7 @@ Historical full-dump rows (one per entity per weekly run) from 2026-03-11 throug
 | Live (`agents`, `posts`, `comments`, `submolts`, `moderators`) | 1 (UPSERT) | current state |
 | `*_metrics` | 0–1 (sparse) | counter trajectories |
 | `*_events` | typically 0 | state transitions |
-| Legacy `*_snapshots` | 1 (dense) | historical full dump; retire in Phase 4 |
+| Legacy `*_snapshots` | — | DROPPED 2026-05-03; cold-storage dump only |
 | `scrape_runs` | 1 per run | run metadata |
 
 ## Deletion-content preservation

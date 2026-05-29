@@ -1,7 +1,6 @@
 # CLAUDE.md - Project Guide for Moltbook Scraper
 
-wherever possible, this file should be kept between 100-150 lines (maximum 200)
-if this file goes beyond, recommend which lines should be removed or included in other .md files
+Keep this file ≤ 150 lines (max 200). If it grows, move detail to its real home — `data/README.md` (data model), `claude_methodology_log.md` (decisions), `readme_api_limit.md` (rate limits), or a session log (rationale) — and leave a pointer here.
 
 ## Project Overview
 
@@ -22,79 +21,61 @@ python -m src.cli incremental --db data/raw/moltbook.db
 # IMPORTANT: always use -u (unbuffered stdout) for background runs so errors surface in log
 python -u -m src.cli submolts --db data/raw/moltbook.db --log-file logs/scrape-submolts.log
 python -u -m src.cli posts --db data/raw/moltbook.db --log-file logs/scrape-posts.log
-python -u -m src.cli comments --only-missing --skip-empty --workers 16 --db data/raw/moltbook.db --log-file logs/scrape-comments.log
-python -u -m src.cli enrich --workers 16 --db data/raw/moltbook.db --log-file logs/scrape-enrich.log
-python -u -m src.cli moderators --workers 4 --db data/raw/moltbook.db --log-file logs/scrape-moderators.log
+python -u -m src.cli comments --only-missing --skip-empty --db data/raw/moltbook.db --log-file logs/scrape-comments.log
+python -u -m src.cli enrich --only-missing --db data/raw/moltbook.db --log-file logs/scrape-enrich.log
+python -u -m src.cli moderators --db data/raw/moltbook.db --log-file logs/scrape-moderators.log
 python -m src.cli snapshots --db data/raw/moltbook.db
 
-# Database status
+# Database status / fetch platform docs
 python -m src.cli status --db data/raw/moltbook.db
-
-# Fetch platform documentation
 python -m src.cli docs
 
-# Full re-scrape with deletion detection (monthly)
-python -u -m src.cli posts --db data/raw/moltbook.db --detect-deletions --log-file logs/scrape-posts.log
+# Full re-scrape with deletion detection (monthly only)
+python -u -m src.cli posts    --db data/raw/moltbook.db --detect-deletions --log-file logs/scrape-posts.log
 python -u -m src.cli comments --db data/raw/moltbook.db --detect-deletions --log-file logs/scrape-comments.log
 ```
+
+**Always run sequential** (`--workers 1`, the default). Multi-worker is slower for this API and trips the infra rate limit — see `readme_api_limit.md` / `claude_learnings.md`.
 
 ### VM Automation (Hetzner)
 
 ```bash
-# Weekly cron (Mon 02:00 UTC): 6 stages — incremental, submolts, comments, moderators, enrich, snapshots
-# Steady-state runtime ~20 h (post-Phase-4 corpus; e.g. May 4: 19.5 h, May 25: 20.6 h). NOT 8-10 h.
-# moderators is the swing stage: ~11-12 h normally but can spike to ~30 h+ under API rate-limit/backoff
-# pressure (May 18: 31 h). comments scales with the missing-comment backlog and is back-pressure sensitive.
+# Weekly cron (Mon 02:00 UTC): 6 stages — incremental, submolts, comments, moderators, enrich, snapshots.
+# Steady-state ~20 h (NOT 8-10 h); moderators is the swing stage (~12 h, spikes to ~30 h under API back-pressure). See session-30 log §1.
 0 2 * * 1  cd ~/moltbook_scraper && bash scripts/weekly_scrape.sh
 
-# Monthly cron (every Tue 01:55 UTC; script exits on non-first-Tuesdays)
-# First Tuesday lands after the Monday weekly, avoiding the 1st-Monday collision
-# class entirely. Subsequent Mondays during the monthly run skip via sentinel.
+# Monthly cron (every Tue 01:55 UTC; script exits on non-first-Tuesdays). CURRENTLY DISABLED — see handover.
 55 1 * * 2  cd ~/moltbook_scraper && bash scripts/monthly_rescrape.sh
 
 # Daily disk monitor (08:00 UTC): emails if >80% on either disk
 0 8 * * *  cd ~/moltbook_scraper && bash scripts/disk_monitor.sh
 
-# Check status manually (from local machine)
+# Status (from local) / pull DB / push code (then dos2unix!)
 ssh vm 'cd ~/moltbook_scraper && bash scripts/status.sh'
-
-# Pull DB to local
 scp vm:~/moltbook_scraper/data/raw/moltbook.db data/raw/
-
-# Push code to VM (then dos2unix!)
 scp -r src/ scripts/ vm:~/moltbook_scraper/
 ssh vm 'cd ~/moltbook_scraper && dos2unix src/*.py scripts/*.sh'
 ```
 
-**VM storage layout**: DB and backups live on 80 GB volume (`/mnt/HC_Volume_104999576/moltbook_data/`), symlinked from `data/raw/` and `data/backups/`. All paths in scripts and `scp` commands work unchanged.
+**VM storage layout**: DB and backups live on the Hetzner volume (`/mnt/HC_Volume_104999576/moltbook_data/`), symlinked from `data/raw/` and `data/backups/`. All paths in scripts and `scp` commands work unchanged.
 
 ### Testing
 
 ```bash
-pytest                    # Run all tests
+# Scope to specific files — a bare `pytest` HANGS on test_fetch_all_posts_paginates_until_no_more
+# and orphans GBs of RAM (see claude_learnings.md "Process & Workflow").
 pytest tests/test_client.py -v
 ```
 
 ## Configuration
 
-### Environment Variables
-
-- `MOLTBOOK_API_KEY` - Required for scraping (set in `.env` file)
-
-### Database
-
-- SQLite database: `data/raw/moltbook.db` (gitignored; will reach several GB after full scrape)
-- Snapshot tables record point-in-time data for reproducibility
-- Key tables: `agents`, `posts`, `comments`, `submolts`, `moderators`
-- Snapshot tables: `*_snapshots` with `scrape_run_id` for tracking
-- Full schema: `src/database.py:_create_tables()`; human-readable: `data/README.md`
-
+- **Env**: `MOLTBOOK_API_KEY` required for scraping (set in `.env`).
+- **DB**: SQLite at `data/raw/moltbook.db` (gitignored; ~8-9 GB). Live tables `agents`, `posts`, `comments`, `submolts`, `moderators`; change-driven history in `*_metrics` (counter trajectories) + `*_events` (state transitions). Legacy `*_snapshots` were dropped in Phase 4 (2026-05-03).
+- **Schema**: `src/database.py:_create_tables()`; **canonical data dictionary: `data/README.md`**.
 
 ## Code Conventions
 
 - refer to /CLAUDE/project_specific_rules/ for guides specific to the language used (python, R etc.)
-
-## Important Notes
 
 ## Output conventions
 
@@ -102,7 +83,7 @@ from the project directory
 - **Tables**: Save all tables to /tables
 - **Figures** save all figures to /figures
 - **claude scripts** save all figures to code named "claude_xxx.r"
-- **session logs** save all session logs to /CLAUDE/session_logs 
+- **session logs** save all session logs to /CLAUDE/session_logs
 
 ## Process logs
 
@@ -111,76 +92,23 @@ from the project directory
 - **Claude.md** should contain only rules about how Claude should behave and any key, timeless information. No superfluous detail that could be contained in other .md files
 - **claude_methodology_log** should contain any information on processes or decisions made that need to be documented for scientific reproducability. in a table format
 - **learnings.md** should document errors, failures, choke points or dead ends that were encountered and how they were solved including things that were tried and didn't work or were refused by me with the associated reason. The purpose is to stop pursuing directions that were tried in the past.
-- **achive file**  It should be a archive.md file with condensed entries by date of things that were removed from handover, Claude.md and learning.md that are no longer relevant for each session but that offer a very parsimonious bread crumb trail. 
+- **achive file**  It should be a archive.md file with condensed entries by date of things that were removed from handover, Claude.md and learning.md that are no longer relevant for each session but that offer a very parsimonious bread crumb trail.
 
-### API Limitations (quick reference; see `readme_api_limit.md` for rate limit deep dive)
+## Reference & invariants (details live in the linked docs — do not duplicate here)
 
-- Comments: hard cap 500/request, no pagination; scraper passes `limit=500`
-- Follower/following graph not exposed (only counts)
-- Posts: cursor-based pagination (`has_more` + `next_cursor`) with `sort=new` (required for full archive)
-- Submolts: page-based (`?page=N`, 20/page)
-- Embedded agents use camelCase; `_normalize_agent()` converts to snake_case
-- Rate limit: 60/min per token (production); exponential backoff on 429
+- **Data model & schema** → `data/README.md` (canonical): live tables, the change-driven `*_metrics` / `*_events` layers, `*_first`/`*_latest` anchors, query patterns, deletion-content-preservation guard. Rationale: methodology log (2026-04-14, 2026-04-20) + session 21 log.
+- **API quirks** → methodology log (2026-02-28 / 03-02 / 03-05): comments hard-capped 500/req (no pagination); posts cursor-paginated, MUST use `sort=new` for the full archive; submolts page-based (20/page); embedded author objects are camelCase → `_normalize_agent()`. Follower/following graph not exposed (counts only).
+- **Rate limits** → `readme_api_limit.md` (top block) + session-30 log §2/§5: regime changed 2026-05-29 (tiered limiter + CloudFront; sequential ~25/min is safe; `_request` honors `Retry-After`). Dead ends — no `--workers > 1`, no proactive throttling (`claude_learnings.md`).
+- **Snapshot health check** (after each weekly, tail `logs/scrape-snapshots.log`): alert if `inserted_metrics > 0.5×entities_scanned` (over-writing), `inserted_metrics == 0` on a table that clearly moved (silent fail), or `inserted_events > 1000` (likely boolean-compare bug). Full R1 spec: session 21 log.
+- **Cron coordination & backups** → methodology log (2026-04-20, 2026-04-27): weekly Mon 02:00 / monthly first-Tuesday; `.monthly_running` sentinel lets an overlapping weekly skip cleanly; retention = latest weekly + latest monthly-post only.
 
-### Snapshot policy (Phase 3 design — see session 21 log for rationale)
+## Research Ethics
 
-After the Phase 3 redesign, the snapshot layer is **change-driven and narrow**, not a weekly full dump. Policy by column type:
-
-- **Text / URL / JSON on an immutable entity** (posts.title, posts.content, comments.content, author_name, submolt_name, post url): stored on the **live table only, never snapshotted**. Posts and comments are immutable after creation per the 2026-04-14 audit (0.0000 % change across 6.2 M post-pairs and 9.88 M comment-pairs).
-- **Text on a mutable entity** (agents.description, submolts.description): **first + latest anchor** on the live table via `*_first` and `*_latest` columns.
-- **Numeric counters** (karma, follower_count, following_count, upvotes, downvotes, comment_count, subscriber_count): **change-driven inserts** into `*_metrics` panels. Posts use a 4-week age cutoff; other entities have no cutoff.
-- **Booleans / enum state** (is_pinned, is_locked, is_deleted, is_spam, is_claimed, verification_status, moderator role): **event log** in `*_events` tables, one row per transition. Initial state is captured in the `*_first` anchor columns on live tables (Migration 10) — events are ONLY emitted for subsequent transitions. First observation is NOT an event.
-- **Cosmetic URLs** (avatar_url, banner_url): live table only; dropped from snapshots entirely.
-- **Hot-score**: `posts.hot_score_first` + `posts.hot_score_first_observed_at` on live table. Decay is fast enough that first-observed is the only interpretable value.
-
-**Consequences for analysis (R code):**
-- Queries that joined `post_snapshots` / `comment_snapshots` for content must now read content from `posts` / `comments` directly. Content is preserved across the lifetime of the entity.
-- Queries that need vote trajectory read from `post_metrics` (only for posts seen within 4 weeks of creation) or use `upvotes` / `downvotes` on the live table for a single latest value.
-- Queries that need state transitions (was this post pinned in week X?) read from `post_events` / `agent_events` / etc.
-- The legacy `*_snapshots` tables were dropped in Phase 4 (2026-05-03, session 25). No compatibility VIEWs were created — `analysis/R/` did not depend on them under the Phase 3 design. If a one-off historical query is ever needed, restore from the cold-storage dump (`gunzip -c data/archive/legacy_snapshots_2026-04-27.sql.gz | sqlite3 restored.db`) into a separate file; do not load back into the live DB.
-
-### Deletion-content preservation
-
-`upsert_post` and `upsert_comment` use a guard clause: `content = CASE WHEN is_deleted = 1 THEN <table>.content ELSE excluded.content END`. Once a post or comment is marked deleted, its content is never overwritten, even if the API later returns a tombstone form.
-
-### Weekly / monthly cron coordination
-
-- Monthly cron fires every Tuesday 01:55 UTC; `monthly_rescrape.sh` exits cleanly when day-of-month > 7. Net effect: monthly runs on the first Tuesday of each month, always after that week's Monday weekly. The `.monthly_running` sentinel is written at start and removed via `trap EXIT INT TERM`.
-- Weekly checks the sentinel at start; skips with a log line if present and <7 days old, proceeds with a warning otherwise (stale-lock recovery). The Mondays that fall during a 5–7 day monthly run skip cleanly because monthly is a superset.
-- Sharding by submolt first-letter (A-H, I-P, Q-Z) is a planned future change to keep each monthly run inside the 7-day window — see methodology log entry. **Not yet implemented as of 2026-04-27.**
-
-### Backup retention policy
-
-Disk budget on the 100 GB Hetzner volume (post-Phase-4 actuals as of 2026-05-03):
-
-- **Live DB**: ~6.2 GB working copy.
-- **Latest weekly backup** (`moltbook-weekly-YYYY-MM-DD.db`): one retained, pruned at end of next weekly run. ~6–7 GB once Apr 27's pre-Phase-4 backup is replaced by the May 4 weekly's.
-- **Latest monthly-post backup** (`moltbook-monthly-post-YYYY-MM-DD.db`): one retained, pruned at end of next monthly run. ~6–7 GB.
-- **No pre-monthly backup** — the latest weekly already provides a "before monthly" recovery point (≤ 7 days stale). Dropped 2026-04-27 (session 24); risk accepted.
-
-Steady state: live DB + 2 backups ≈ ~21 GB used / ~78 GB free. Plenty of runway; no further volume expansion expected.
-
-### Snapshot monitoring (R1 — for new change-driven writer)
-
-Each snapshot run logs per-table: `entities_scanned`, `inserted_metrics`, `inserted_events`. Expected ranges and alerts:
-
-- **Normal**: `inserted_metrics` is a small fraction of `entities_scanned` (1–10 % for active entities; near-zero for mature ones). `inserted_events` very small (state transitions are rare).
-- **Alert A — change detection broken, writing too much**: `inserted_metrics > 0.5 × entities_scanned` on a mature table. Diff comparison is failing; storage will explode. Stop cron, inspect `scraper.create_snapshots()`.
-- **Alert B — change detection broken, writing nothing**: `inserted_metrics == 0` on a table with ≥1000 entities scanned where platform values have clearly moved. Write path is silently failing. Stop cron, inspect logs.
-- **Alert C — event log exploding**: `inserted_events > 1000` per run (excluding moderators on the very first post-migration run — see below). Should be dozens otherwise. Likely boolean comparison bug (e.g. `0` vs `False`). Inspect event writer.
-- **One-time exception**: the first snapshot after Migration 10 is expected to emit ~20k moderator events (baseline "added" for all pairs active at observation start). `post_events` and `agent_events` should be 0 on first run (initial state captured in `*_first` anchors).
-- **Where**: tail of `logs/scrape-snapshots.log` after each weekly run.
-
-### Research Ethics
-
-- Scraper account: `moltbook_archiver` (read-only, no posting)
-- Data describes AI agents, not human subjects
-- Public API access with dedicated research account
+- Scraper account: `moltbook_archiver` (read-only, no posting). Data describes AI agents, not human subjects. Public API access with a dedicated research account.
 
 ## Dependencies
 
 from the requirements.txt or the renv lock file
-
 
 ## Rules for New Scraper Modules
 - **File Location**: New scrapers go in `src/`.
@@ -196,28 +124,15 @@ from the requirements.txt or the renv lock file
 - **Database**: Do not modify existing data in `moltbook.db` without a backup; never drop tables.
 - **Safety**: Do not use `sudo`. Do not reveal `MOLTBOOK_API_KEY` in logs or chat outputs.
 - **Costs**: If an automated task (like a loop) exceeds 5 iterations without success, stop and ask for guidance to avoid burning API tokens.
+- **Code changes** [session 30]: identify new fail-states (test them, or state why none are plausible); leave a revert-trail — a comment at the change site + a pointer in a suitable `.md` to the session log explaining why.
 
 ## Context & Token Economy
-
-### Log file handling
-- **Never** `Read` an entire scrape log file. Scrape logs can be hundreds of thousands of lines (multi-day processes). Always use `tail -50` or `head -50` via Bash first, or use `Read` with `offset`/`limit` to sample specific regions.
-- When diagnosing scrape failures, read only the **last 100 lines** of the log unless explicitly asked for more.
-
-### Large file guardrails
-- Before reading any file, check its size. If > 5,000 lines, read only the relevant section (start, end, or grep for keywords).
-- Never dump entire database query results into chat. Use `LIMIT 10` for exploratory queries; use `COUNT(*)` for sizing.
-
-### Error-loop circuit breaker
-- If the same tool call (Bash command, Read, etc.) fails **3 times in a row** with the same or similar error, **stop and ask the user** rather than retrying with minor variations. This prevents context-burning retry loops.
-- If a code fix → test cycle fails **3 consecutive times**, pause and present a summary of what was tried and what failed.
-
-### Scraping cost awareness
-- Before starting any scrape command, state the estimated duration and API call count.
-- If a scrape command has been running for > 10 minutes in a foreground Bash call, do not wait — inform the user it should be backgrounded or run in a separate terminal.
+- **Logs**: never `Read` a full scrape log (can be 100k+ lines). `tail`/`head` first, or read the last ~100 lines when diagnosing.
+- **Large files / queries**: if > 5,000 lines, read only the relevant section. Never dump full DB results into chat — `LIMIT 10` to explore, `COUNT(*)` to size.
+- **Error-loop breaker**: if the same call fails 3× in a row, or a fix→test cycle fails 3×, stop and summarize rather than retrying with minor variations.
+- **Scrape cost**: state estimated duration + API call count before starting; background anything running > 10 min in the foreground.
 
 ## Data Hygiene
-
-- Large databases (>100MB) should be stored in `data/raw/` which is added to `.gitignore`. Only `.rds` summaries go in `data/processed/`.
-- Always use `data/raw/moltbook.db` as the DB path — do not store the DB in the project root.
-- R scripts in `analysis/R/` expect the DB at `../../data/raw/moltbook.db` (relative to their directory). Update `utils.R:connect_db()` if the DB path changes.
-
+- Large databases (>100MB) live in `data/raw/` (gitignored). Only `.rds` summaries go in `data/processed/`.
+- Always use `data/raw/moltbook.db`; do not store the DB in the project root.
+- R scripts in `analysis/R/` expect the DB at `../../data/raw/moltbook.db`. Update `utils.R:connect_db()` if the path changes.

@@ -131,6 +131,13 @@ User approved: commit cheap-reads, then start Phase 0. Also set a standing **cha
 ### Still open (Phase 0 part 3)
 Date *when* the regime changed: diff the `upstream` (`daveholtz/moltbook_scraper`) + observatory repos' `src/middleware/rateLimit.js` history / web-search for a Moltbook (Meta?) API change. Deferred — not needed for the backoff fix.
 
+## 6. Session-summary closeout (VM deploy + doc prune)
+
+- **VM deploy:** pushed `src/client.py` (Phase-0 backoff) → `/root/moltbook_scraper/src/`, `dos2unix`'d, smoke-tested in the VM venv (MAX_BACKOFF=120; honored/capped/fallback all correct). Applies to the Jun-1 weekly. No scripts or other source files needed deploying.
+- **Doc prune** (user-requested context-creep cleanup): CLAUDE.md 224 → ~140 lines — removed detail duplicating `data/README.md` (data model, deletion-preservation) and the methodology log (API quirks, cron, backups), condensed snapshot-monitoring, replaced with a "Reference & invariants" pointer section; fixed stale `*_snapshots`/runtime lines and the dangerous bare-`pytest` testing example. `data/README.md` corrected (legacy `*_snapshots` → dropped; `*_metrics`/`*_events` field lists → actual schema; is_spam/agent_events caveats). Handover rewritten as a current launchpad. Archive + methodology breadcrumbs added. **No content lost** — all detail relocated to its canonical home.
+- **Processes clean:** local = only the Positron IDE language server; VM = only a system unattended-upgrade. The session's runaway pytest loops were killed earlier (see §5 / learnings).
+- **Memory:** saved a feedback memory — code-change discipline (assess fail-states; leave a revert-trail).
+
 ## Next actions (delta vs session-29 handover)
 
 1. Commit sessions 29 + 30 docs (currently uncommitted).
