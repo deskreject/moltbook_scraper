@@ -3,7 +3,7 @@
 import time
 import responses
 import pytest
-from src.client import MoltbookClient
+from src.client import MoltbookClient, RateLimitError
 
 
 class TestMoltbookClientFetchSubmolts:
@@ -219,3 +219,36 @@ class TestMoltbookClientRateLimiting:
         """Client should track number of requests made."""
         client = MoltbookClient(api_key="test_key")
         assert client.request_count == 0
+
+
+class TestFetchCommentsOnlyRateLimit:
+    """T6 — regression guard for the May-5 false-deletion root cause.
+
+    `fetch_comments_only` currently catches *all* exceptions and returns [],
+    so a persistent 429 is indistinguishable from "this post has no comments".
+    In a `--detect-deletions` run that empty list causes every existing comment
+    on the post to be tombstoned (the May 5 monthly incident — sessions 26/29).
+
+    Contract pinned here: under a 429 storm the method must *raise*
+    RateLimitError, not silently return []. Marked xfail until the Phase 1
+    safeguard lands (re-raise RateLimitError in fetch_comments_only); remove the
+    marker then so this becomes the standing regression guard.
+    """
+
+    @responses.activate
+    @pytest.mark.xfail(
+        reason="fetch_comments_only still swallows RateLimitError -> []; "
+               "fix is Phase 1 step 5 (re-raise). Remove this marker once fixed.",
+        strict=False,
+    )
+    def test_raises_ratelimit_error_instead_of_returning_empty(self):
+        post_id = "post-under-ratelimit"
+        url = f"https://www.moltbook.com/api/v1/posts/{post_id}/comments"
+        # Persistent 429 across every retry attempt (more than max_retries+1).
+        for _ in range(5):
+            responses.add(responses.GET, url, json={"error": "Rate limited"}, status=429)
+
+        client = MoltbookClient(api_key="test_key", max_retries=2, base_delay=0)
+
+        with pytest.raises(RateLimitError):
+            client.fetch_comments_only(post_id)
