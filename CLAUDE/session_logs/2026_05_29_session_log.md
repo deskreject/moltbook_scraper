@@ -105,6 +105,32 @@ Quantified the weekly-cadence blind spot for vote dynamics:
 - `tests/test_client.py` — T6 xfail regression guard (+import RateLimitError).
 - this log + handover + methodology (is_spam-artifact row).
 
+## 5. Phase 0 — rate-limit regime characterization + header-aware backoff
+
+User approved: commit cheap-reads, then start Phase 0. Also set a standing **change-discipline** (saved to memory): every code change → assess fail-states (test if plausible, else justify no-test) + leave a revert-trail (code comment + `.md` pointer to this log).
+
+### Characterization (read-only, VM/prod IP)
+8-request spaced probe + a window-length check:
+- `short`=30/1s, `medium`=600/60s, `long`=10000/300s — all barely move at our sequential ~25/min (~0.4/s); `short` (30/1s) is **unreachable** at our rate.
+- **Binding app-layer limiter = unsuffixed `x-ratelimit-limit: 200`** — decrements 1/request, fixed-epoch reset, `reset − now = 10s` mid-window ⇒ ~60s window ⇒ ~200/min, still **~8× headroom** over our rate. Operationally consistent (weeklies run at ~25/min with ~0 app 429s).
+- 200-status responses carry **no `Retry-After`** (only 429s would). Anon==authed (confirmed again) ⇒ IP/global bucket.
+- **Conclusion:** the application layer is *not* the constraint at sequential rate. The real exposure is the **headerless CloudFront/infra layer** (sustained-rate trips, multi-min cooldown — the May-5 monthly mode). So: honor `Retry-After` when present (app layer), exponential-fallback when absent (infra layer); do **not** add proactive throttling (readme §"What NOT to do" — proven dead-end, caused 429 storms in session 3).
+
+### Code change (`src/client.py`)
+- New `MAX_BACKOFF_SECONDS = 120.0` class const + `_backoff_delay(attempt, retry_after)` pure helper.
+- `_request` 429 branch now sleeps `_backoff_delay(...)` = `min(max(Retry-After, exp), 120)` when `Retry-After` is a sane positive int; else `min(exp, 120)`. All change sites carry a `# [session 2026_05_29: …]` revert-trail comment pointing here; readme_api_limit.md top block updated ("Mitigation applied").
+
+### Fail-states identified + tested (`tests/test_client.py::TestBackoffDelay`)
+1. **Pathologically large `Retry-After`** (e.g. infra cooldown) stalling a stage → **capped at 120s** so retries exhaust and `RateLimitError` surfaces. (`test_large_retry_after_is_capped`)
+2. **Malformed `Retry-After`** (HTTP-date form or garbage) crashing the parse → try/except **falls back to exponential**, no raise. (`test_malformed_retry_after_falls_back`)
+3. **Regression on the no-header path** → `None` reproduces prior exponential backoff exactly. (`test_absent_retry_after_is_exponential`)
+   Plus: honored-when-longer, exp-wins-when-shorter, non-positive-falls-back, and an end-to-end 429+Retry-After test (patched `time.sleep`). The change can only ever degrade to current behavior (exp backoff), so it cannot make things worse.
+- Worst realistic side effect: if the infra layer ever *does* send a large `Retry-After`, we now wait up to 120s/attempt instead of seconds — bounded and intentional.
+- **Result:** `7 passed, 1 xfailed in 0.06s` (the xfail is T6). First cut of the end-to-end test **looped forever** — `responses` replays its last registered mock, so the paginating `fetch_submolts` never hit an empty page (~1.5 GB RAM, killed mid-run). Rewrote it to drive `_request` directly. Breadcrumb in learnings.md "Process & Workflow".
+
+### Still open (Phase 0 part 3)
+Date *when* the regime changed: diff the `upstream` (`daveholtz/moltbook_scraper`) + observatory repos' `src/middleware/rateLimit.js` history / web-search for a Moltbook (Meta?) API change. Deferred — not needed for the backoff fix.
+
 ## Next actions (delta vs session-29 handover)
 
 1. Commit sessions 29 + 30 docs (currently uncommitted).

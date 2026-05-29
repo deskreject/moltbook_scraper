@@ -1,8 +1,10 @@
 """Tests for MoltbookClient API wrapper."""
 
 import time
+from unittest.mock import patch
 import responses
 import pytest
+import src.client as client_mod
 from src.client import MoltbookClient, RateLimitError
 
 
@@ -252,3 +254,59 @@ class TestFetchCommentsOnlyRateLimit:
 
         with pytest.raises(RateLimitError):
             client.fetch_comments_only(post_id)
+
+
+class TestBackoffDelay:
+    """Fail-state coverage for Retry-After-aware 429 backoff (added 2026-05-29).
+
+    Motivated by the API rate-limit regime change (tiered limiter + CloudFront);
+    see readme_api_limit.md top block + CLAUDE/session_logs/2026_05_29_session_log.md §2.
+    `_backoff_delay` is a pure function, so the fail-states are tested without sleeping.
+    """
+
+    def _client(self, base_delay=1.0, max_retries=3):
+        return MoltbookClient(api_key="k", base_delay=base_delay, max_retries=max_retries)
+
+    def test_honors_integer_retry_after(self):
+        # attempt 0 -> exp=1; Retry-After=5 is longer, so it is honored.
+        assert self._client()._backoff_delay(0, "5") == 5.0
+
+    def test_retry_after_never_below_exponential(self):
+        # attempt 3 -> exp=8; Retry-After=2 is shorter, so exp wins.
+        assert self._client()._backoff_delay(3, "2") == 8.0
+
+    def test_large_retry_after_is_capped(self):
+        # Fail-state 1: a huge (e.g. infra-cooldown) Retry-After must not stall a
+        # stage for many minutes — capped so retries exhaust and the error surfaces.
+        assert self._client()._backoff_delay(0, "9999") == MoltbookClient.MAX_BACKOFF_SECONDS
+
+    def test_malformed_retry_after_falls_back(self):
+        # Fail-state 2: HTTP-date form or garbage must not raise; fall back to exp.
+        c = self._client()
+        assert c._backoff_delay(0, "Wed, 21 Oct 2026 07:28:00 GMT") == 1.0
+        assert c._backoff_delay(0, "soon") == 1.0
+
+    def test_nonpositive_retry_after_falls_back(self):
+        c = self._client()
+        assert c._backoff_delay(1, "0") == 2.0    # exp at attempt 1 = 2
+        assert c._backoff_delay(1, "-5") == 2.0
+
+    def test_absent_retry_after_is_exponential(self):
+        # Fail-state 3 (regression): no header => unchanged exponential backoff.
+        assert self._client()._backoff_delay(2, None) == 4.0  # exp at attempt 2 = 4
+
+    @responses.activate
+    def test_429_with_retry_after_honored_end_to_end(self):
+        # Drive _request directly (not fetch_submolts) so exactly the two mocked
+        # responses are consumed — a paginating caller would loop forever because
+        # `responses` repeats the last registered response.
+        url = "https://www.moltbook.com/api/v1/posts"
+        responses.add(responses.GET, url, json={"error": "rl"}, status=429,
+                      headers={"Retry-After": "3"})
+        responses.add(responses.GET, url, json={"success": True}, status=200)
+        client = MoltbookClient(api_key="k", max_retries=3, base_delay=1.0)
+        with patch.object(client_mod.time, "sleep") as mock_sleep:
+            resp = client._request("GET", url)
+        assert resp.status_code == 200
+        # The single retry slept the honored Retry-After (3s), not attempt-0 exp (1s).
+        assert mock_sleep.call_args_list[0].args[0] == 3.0

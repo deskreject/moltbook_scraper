@@ -73,6 +73,14 @@ class MoltbookClient:
 
     BASE_URL = "https://www.moltbook.com/api/v1"
 
+    # Cap on how long a single 429 backoff will sleep. App-layer cooldowns are
+    # short (<=60s); this bounds a pathological/large Retry-After (e.g. an
+    # infra-layer cooldown) so one 429 cannot stall a stage for many minutes —
+    # retries exhaust and RateLimitError surfaces instead.
+    # [session 2026_05_29: rate-limit regime change — see readme_api_limit.md top
+    #  block + CLAUDE/session_logs/2026_05_29_session_log.md §2 for why.]
+    MAX_BACKOFF_SECONDS = 120.0
+
     def __init__(
         self,
         api_key: str,
@@ -132,7 +140,13 @@ class MoltbookClient:
             # Retry on rate limit (429)
             if response.status_code == 429:
                 if attempt < self.max_retries:
-                    delay = self.base_delay * (2 ** attempt)
+                    # [session 2026_05_29] The API rate-limit regime changed
+                    # (tiered limiter + CloudFront). On an app-layer 429 the
+                    # server signals a precise cooldown via Retry-After; honor it
+                    # (bounded) instead of a blind exponential sleep. Infra-layer
+                    # (CloudFront) 429s carry no Retry-After -> fall back to
+                    # exponential. See readme_api_limit.md / 2026_05_29 log §2.
+                    delay = self._backoff_delay(attempt, response.headers.get("Retry-After"))
                     time.sleep(delay)
                     continue
                 else:
@@ -153,6 +167,29 @@ class MoltbookClient:
 
         # Should not reach here
         raise RateLimitError("Max retries exceeded")
+
+    def _backoff_delay(self, attempt: int, retry_after: Optional[str]) -> float:
+        """Seconds to sleep before retrying a 429.
+
+        Honors the server's ``Retry-After`` (integer seconds) when present and
+        sane — never shorter than exponential backoff, never longer than
+        ``MAX_BACKOFF_SECONDS``. Falls back to pure exponential backoff when the
+        header is absent or unparseable (infra-layer 429s, or the HTTP-date form
+        of Retry-After, which we deliberately do not parse). Pure function of its
+        inputs so it is unit-testable without sleeping.
+
+        [session 2026_05_29: added for the rate-limit regime change — see
+        readme_api_limit.md top block + 2026_05_29 session log §2.]
+        """
+        exp = self.base_delay * (2 ** attempt)
+        if retry_after is not None:
+            try:
+                ra = float(retry_after)
+                if ra > 0:
+                    return min(max(ra, exp), self.MAX_BACKOFF_SECONDS)
+            except (TypeError, ValueError):
+                pass  # HTTP-date or garbage -> fall back to exponential
+        return min(exp, self.MAX_BACKOFF_SECONDS)
 
     def fetch_submolts(
         self,
